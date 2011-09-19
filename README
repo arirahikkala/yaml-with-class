@@ -1,0 +1,8 @@
+YAML serialization and deserialization from general Haskell data to ByteStrings
+or files containing YAML documents. See Haddock or just the comments for usage
+documentation.
+
+This package is heavily based on modified versions of the packages RJson by 
+Alex Drummond, data-object-yaml by Michael Snoyman and Anton Ageev, data-object
+by Michael Snoyman and Nicolas Pouillard, and yaml by Michael Snoyman, 
+Anton Ageev and Kirill Simonov.
