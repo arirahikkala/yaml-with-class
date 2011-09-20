@@ -37,6 +37,7 @@ Cabal-version:       >=1.2
 
 
 Library
+  Hs-source-dirs: src
   Exposed-modules: Text.YamlPickle, Data.DynStableName, Data.YamlObject
   
   -- Packages needed in order to build this package.
