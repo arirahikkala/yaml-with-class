@@ -9,6 +9,7 @@
 {-# LANGUAGE DeriveDataTypeable #-} 
 {-# LANGUAGE DoAndIfThenElse  #-}
 -- todo:
+-- test if AllowExclusion works
 -- add usingCache to all ToYaml instances
 -- stacked errors (i.e. "got error x on line a1-b1, within element y on lines a2-b2, within element z on...")
 -- write FromYaml instances
@@ -26,6 +27,8 @@
 module Data.YamlObject (
 -- * Simple use
         makeYaml, ToYamlObject, unmakeYaml, FromYamlObject,
+-- * Support for ephemeral data
+        AllowExclusion(..),
 -- * Sharing
         DoShare(..), cleanUpReferences,
 -- * Specialized instances 
@@ -68,7 +71,7 @@ import qualified Data.Text as T
 import Data.Text (Text)
 
 import Data.DynStableName
-import Text.Libyaml (Position)
+import Text.Libyaml (Position(..))
 
 import Control.Applicative
 import Data.Traversable (traverse)
@@ -441,27 +444,37 @@ modifyFromYaml = FromYamlT . modify
 
 type FromYamlM = FromYamlT Identity
 
+{-| Note: Implementations of allowExclusion MUST NOT EVALUATE THEIR ARGUMENT. It's only there to specify the type. Similarly, you MUST NOT allow the exclusion of a strict member of a record.
 
-class TranslateField a => FromYaml a where
+-}
+class AllowExclusion a where
+    allowExclusion :: a -> String -> Bool
+
+data AllowExclusionD a = AllowExclusionD {
+      allowExclusionD :: a -> String -> Bool
+}
+
+instance AllowExclusion t => Sat (AllowExclusionD t) where
+    dict = AllowExclusionD { allowExclusionD = allowExclusion }
+
+class (TranslateField a, AllowExclusion a) => FromYaml a where
     fromYaml :: YamlObject FromYamlAnnotation Text Text -> FromYamlM a
-
-    objectDefaults :: a -> Map Text (YamlObject FromYamlAnnotation Text Text)
-    objectDefaults _ = Map.empty
 
 data FromYamlD a = FromYamlD {
       fromYamlD :: YamlObject FromYamlAnnotation Text Text -> FromYamlM a,
-      objectDefaultsD :: a -> Map Text (YamlObject FromYamlAnnotation Text Text),
+      allowExclusionD' :: a -> String -> Bool,
       translateFieldD'' :: a -> String -> String }
 
 fromYamlProxy :: Proxy FromYamlD
 fromYamlProxy = error "fromYamlProxy should never be evaluated!"
 
-
-
 instance FromYaml t => Sat (FromYamlD t) where
     dict = FromYamlD { fromYamlD = fromYaml,
-                       objectDefaultsD = objectDefaults,
+                       allowExclusionD' = allowExclusion,
                        translateFieldD'' = translateField }
+
+instance AllowExclusion a where
+    allowExclusion _ _ = False
 
 
 scalarFromYamlAttempt :: forall t k x. (ConvertAttempt String t, Typeable t, Show t) => YamlObject FromYamlAnnotation Text Text -> FromYamlM t
@@ -528,7 +541,7 @@ instance (Typeable a, FromYaml a) => FromYaml [a] where
 
 -- todo: I suppose I'm ready to start filling out these instances...
 
-{- Note that references to references are OK, as references can only be made to earlier data, and at any point in the data all earlier references will already have been resolved to their target. Anchors containing anchors need to be specially handled by tryCache though (as do anchors containing references).
+{- Note that references to references are OK, as references can only be made to earlier data, and at any point in the data all earlier references will already have been resolved to their target. Anchors containing anchors need to be specially handled by tryCache though (as do anchors containing references). Though I'm not sure if those even occur in YamlPickle-generated trees or if they're just an artifact of the overly permissive datatype.
 
 -}
 
@@ -550,18 +563,52 @@ tryCache (Reference ann a) _ = do
                 Just r -> return r
 tryCache a cont = cont a
 
+mapAnnotations f (Scalar ann a) = Scalar (f ann) a
+mapAnnotations f (Sequence ann ss) = 
+    Sequence (f ann) $ map (mapAnnotations f) ss
+mapAnnotations f (Mapping ann ps) =
+    Mapping (f ann) $ zip (map fst ps) $ map (mapAnnotations f) $ map snd ps
+mapAnnotations f (Reference ann a) = Reference (f ann) a
+mapAnnotations f (Anchor a c) = Anchor a $ mapAnnotations f c
+
+addDummyFromYamlAnnotations :: 
+    YamlObject a k v -> YamlObject FromYamlAnnotation k v
+
+addDummyFromYamlAnnotations = mapAnnotations (const $ FromYamlAnnotation $ Position 0 0 0 0)
 
 genericFromYaml :: forall a. (Data FromYamlD a, FromYaml a, TranslateField a) => YamlObject FromYamlAnnotation Text Text -> FromYamlM a
 genericFromYaml yamlData =
+    tryCache yamlData $ \yamlData' ->
     let dummy = undefined :: a
         datatype = dataTypeOf fromYamlProxy dummy
         rep = datarep datatype
-        withConstructor v cs a = case find ((== v) . T.pack . constring) cs of
---                                 Nothing -> throwError ("Bad fromYaml conversion: Couldn't find constructor " ++ show v)
-                                 Just c -> a c
+        withConstructor v cs a = 
+            case find ((== v) . T.pack . constring) cs of
+              Nothing -> throwError $ UnexpectedElementType
+                         (fromYamlPosition (annotation yamlData'))
+                         ("a constructor of " ++ show datatype)
+                         (convertSuccess v)
+              Just c -> a c
+        constructField :: 
+            (Data FromYamlD x) =>
+            Position
+            -> String
+            -> StateT ([(Text,  YamlObject FromYamlAnnotation Text Text)], [Text]) FromYamlM x
+        constructField pos name = do
+          (fieldsMap, fieldsList) <- get
+          case fieldsList of
+            [] -> error "constructField in an impossible situation: fromConstrM called us more times than there are fields to look at!"
+            (field:fs) -> do
+              put (fieldsMap, fs)
+              case lookup field fieldsMap of
+                Nothing -> if allowExclusionD' dict dummy (cs field) 
+                           then return $ error "constructField: exclusion allowed per allowExclusion instance"
+                           else throwError $ MissingMapElement pos name (cs field)
+                Just y -> lift $ fromYamlD dict y
+
     in
       case rep of
-        AlgRep cs -> tryCache yamlData $ \yamlData' ->
+        AlgRep cs ->
             case yamlData' of
               Scalar ann v -> -- we're in the generic instance and seeing a scalar? Must be a nullary constructor (I think)
                   withConstructor v cs (return . fromConstr fromYamlProxy)
@@ -569,38 +616,32 @@ genericFromYaml yamlData =
                   tryCache o $ \o' ->
                   case o' of
                     Mapping ann as -> 
-                        withConstructor v cs (\c -> evalStateT (fromConstrM fromYamlProxy (constructField (convertSuccess $ objectDefaultsD dict dummy)) c) 
-                                                             (as, map (convertSuccess . translateFieldD'' dict dummy) $ constrFields c))
+                        withConstructor v cs (\c -> evalStateT (fromConstrM fromYamlProxy (constructField (fromYamlPosition ann) (show datatype)) c)
+                                              (as, map (convertSuccess . translateFieldD'' dict dummy) $ constrFields c))
                     Sequence ann as ->
-                        withConstructor v cs (\c -> evalStateT (fromConstrM fromYamlProxy constructUnnamedParameter c)
+                        withConstructor v cs (\c -> evalStateT (fromConstrM fromYamlProxy (constructUnnamedParameter (fromYamlPosition ann) (show datatype)) c)
                                                                 as)
---              _ -> throwError ("Bad fromYaml conversion: Unexpected structure in genericFromYaml")
---        _ -> throwError "Bad fromYaml conversion: Trying to convert into non-algebraic type with genericFromYaml"
+              _ -> throwError $ 
+                   UnexpectedElementType (fromYamlPosition $ annotation yamlData')
+                                         "(scalar or single-element mapping)"
+                                         (head . words . show $ yamlData')
+        _ -> error "genericFromYaml: generic instance called for a non-algebraic data type!"
 
-constructUnnamedParameter :: forall a. (Data FromYamlD a) => StateT [YamlObject FromYamlAnnotation Text Text] FromYamlM a
-constructUnnamedParameter = do
+constructUnnamedParameter :: 
+    forall a. (Data FromYamlD a) => 
+    Position
+    -> String
+    -> StateT [YamlObject FromYamlAnnotation Text Text] FromYamlM a
+constructUnnamedParameter pos name = do
   objs <- get
   case objs of
---    [] -> throwError "Bad fromYaml conversion: Not enough elements in sequence to satisfy constructor"
+    [] -> throwError $ InsufficientElements pos name
     (o:objs) -> do
               put objs
               lift $ fromYamlD dict o
 
 type YObject = YamlObject Text Text
 
-constructField :: forall a.
-                  (Data FromYamlD a) => 
-                  Map.Map Text (YamlObject FromYamlAnnotation Text Text)
-               -> StateT ([(Text,  YamlObject FromYamlAnnotation Text Text)], [Text]) FromYamlM a
-constructField defaults = do
-  (fieldsMap, fieldsList) <- get
-  case fieldsList of
---    [] -> throwError "Bad fromYaml conversion: Not enough fields to satisfy constructor"
-    (field:fs) -> do
-      put (fieldsMap, fs)
-      case getFirst $ (First $ lookup field fieldsMap) `mappend` (First $ Map.lookup field defaults) of
---        Nothing -> throwError ("Bad fromYaml conversion: No value or default value for field " ++ show field)
-        Just y -> lift $ fromYamlD dict y
 
 instance (Data FromYamlD t, TranslateField t) => FromYaml t where
     fromYaml = genericFromYaml
