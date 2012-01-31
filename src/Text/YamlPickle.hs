@@ -55,8 +55,6 @@ import Data.String (IsString (fromString))
 
 import Control.Arrow ((***))
 
-import qualified Data.HashMap as Hash
-
 import Foreign.C
 import Foreign.Ptr
 
@@ -368,9 +366,9 @@ parseM start merges a front = do
 
 
 
-decode :: (Failure ParseException m)--, IsYamlScalar k, IsYamlScalar v)
+decode :: (Failure ParseException m, IsYamlScalar k, IsYamlScalar v)
        => ByteString
-       -> m (YamlObject FromYamlAnnotation YamlScalar YamlScalar)-- k v)
+       -> m (YamlObject FromYamlAnnotation k v) --YamlScalar YamlScalar)-- k v)
 decode bs = unsafePerformIO $ do
     x <- flip evalStateT (ParserState Map.empty 0) $ runPErrorT $ E.run $ Y.decode bs $$ parse
     case x of

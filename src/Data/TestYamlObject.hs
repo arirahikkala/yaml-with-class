@@ -17,8 +17,8 @@ data Foo = Foo {
 } | Bar Foo Foo
     deriving Show
 
---instance DoShare Foo where
---    doShare _ = True
+instance DoShare Foo where
+    doShare _ = True
 
 instance AllowExclusion Foo where
     allowExclusion _ _ | trace "foo1" False = undefined

@@ -30,7 +30,7 @@ Build-type:          Simple
 
 -- Extra files to be distributed with the package, such as examples or
 -- a README.
--- Extra-source-files:  
+Extra-source-files:  cbits/helper.h cbits/yaml_private.h cbits/yaml.h
 
 -- Constraint on the version of Cabal needed to build this package.
 Cabal-version:       >=1.2
@@ -38,8 +38,10 @@ Cabal-version:       >=1.2
 
 Library
   Hs-source-dirs: src
+  C-sources: cbits/api.c  cbits/dumper.c  cbits/emitter.c  cbits/helper.c  cbits/loader.c  cbits/parser.c  cbits/reader.c  cbits/scanner.c  cbits/writer.c 
+  include-dirs: cbits
   Exposed-modules: Text.YamlPickle, Data.DynStableName, Data.YamlObject
-  
+  Other-modules: Text.Libyaml
   -- Packages needed in order to build this package.
   Build-depends: hashmap == 1.2.*, enumerator == 0.4.*, mtl == 2.*, transformers == 0.2.*, convertible-text == 0.3.*, bytestring == 0.9.*, text == 0.*, failure == 0.1.*, containers == 0.4.*, base == 4.*, array == 0.3.*, attempt == 0.3.*, syb-with-class == 0.6.*
 
