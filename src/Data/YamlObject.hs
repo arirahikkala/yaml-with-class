@@ -26,7 +26,7 @@
 
 module Data.YamlObject (
 -- * Simple use
-        makeYaml, ToYamlObject, unmakeYaml, FromYamlObject,
+        makeYaml, ToYamlObject, unmakeYaml, FromYamlObject, FromYamlException (..),
 -- * Support for ephemeral data
         AllowExclusion(..),
 -- * Sharing
