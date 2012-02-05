@@ -56,14 +56,16 @@ import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 
-import Data.Array
+import Data.Array.IArray
+--import Data.Array.Unboxed (UArray)
+--import qualified Data.Array.Unboxed as Unboxed
 import Data.Ratio
 import Numeric (readFloat)
 
 import qualified Data.HashMap as Hash
 import Data.Dynamic
 
-import Data.List (find)
+import Data.List (find, findIndex)
 
 import Data.Monoid (getFirst, First(First), mappend)
 
@@ -327,12 +329,6 @@ instance (Typeable a, ToYaml a) => ToYaml (Maybe a) where
                                 toMapping [(T.pack "just", inside)]
                  Nothing -> toMapping []
 
-instance (ToYaml a, TranslateField a, Data TranslateFieldD (Map String a))
-         => ToYaml (Map String a) where
-    toYaml x =
-        do vals <- mapM toYaml $ Map.elems x
-           toMapping $ zip (map cs $ Map.keys x) vals
-
 instance (ToYaml a, TranslateField a, Show k, Data TranslateFieldD (Map k a))
          => ToYaml (Map k a) where
     toYaml x =
@@ -347,12 +343,41 @@ instance (ToYaml a, Typeable a) => ToYaml (Set a) where
 instance (ToYaml a, TranslateField a, Typeable a) => ToYaml [a] where
     toYaml xs = toSequence =<< mapM toYaml xs
 
-
-instance (ToYaml a, TranslateField a, Typeable a, Typeable i, Ix i, ToYaml (i, i)) => ToYaml (Array i a) where
+instance (IArray a e, Ix i, ToYaml e, Typeable e, Typeable i, Typeable2 a, ToYaml i) => ToYaml (a i e) where
     toYaml a =
         do bs <- toYaml $ bounds a
            es <- toYaml $ elems a
            toMapping [(T.pack "bounds", bs), (T.pack "elems", es)]
+
+instance (ToYaml a, Typeable a, ToYaml b, Typeable b) => ToYaml (a, b) where
+    toYaml (a, b) =
+        do ar <- toYaml a
+           br <- toYaml b
+           toSequence [ar, br]
+
+instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c) => ToYaml (a, b, c) where
+    toYaml (a, b, c) =
+        do ar <- toYaml a
+           br <- toYaml b
+           cr <- toYaml c
+           toSequence [ar, br, cr]
+
+instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c, ToYaml d, Typeable d) => ToYaml (a, b, c, d) where
+    toYaml (a, b, c, d) =
+        do ar <- toYaml a
+           br <- toYaml b
+           cr <- toYaml c
+           dr <- toYaml d
+           toSequence [ar, br, cr, dr]
+
+instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c, ToYaml d, Typeable d, ToYaml e, Typeable e) => ToYaml (a, b, c, d, e) where
+    toYaml (a, b, c, d, e) =
+        do ar <- toYaml a
+           br <- toYaml b
+           cr <- toYaml c
+           dr <- toYaml d
+           er <- toYaml e
+           toSequence [ar, br, cr, dr, er]
 
 instance (Data ToYamlD t, TranslateField t) => ToYaml t where
     toYaml x = genericToYaml x
@@ -412,8 +437,8 @@ data FromYamlException =
                           , _expectedType :: String
                           , _receivedType :: String} |
     CouldntReadScalar { _position :: Position,
-                        _content :: String,
-                        _triedToReadAsType :: String} |
+                        _expectedType :: String,
+                        _content :: String} |
     MissingMapElement { _position :: Position
                       , _collection :: String
                       , _neededElement :: String} |
@@ -481,7 +506,7 @@ scalarFromYamlAttempt :: forall t k x. (ConvertAttempt String t, Typeable t, Sho
 scalarFromYamlAttempt (Scalar ann n) =
     case (ca :: String -> Attempt t) $ cs n of
       Success v -> return v
-      e -> throwError $ CouldntReadScalar (fromYamlPosition ann) (cs n) (show $ typeOf (undefined :: t))
+      e -> throwError $ CouldntReadScalar (fromYamlPosition ann) (show $ typeOf (undefined :: t)) (cs n) 
 scalarFromYamlAttempt e = 
     throwError $ UnexpectedElementType
                    (fromYamlPosition (annotation e))
@@ -526,17 +551,126 @@ instance FromYaml [Char] where
 instance (Typeable a, FromYaml a) => FromYaml [a] where
     fromYaml v = tryCache v go
                  where 
+                   err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("[" ++ show (typeOf (undefined :: a)) ++ "]") s
+
                    go (Sequence ann xs) = mapM fromYaml xs
-                   go (Mapping ann _) = 
-                       throwError $ UnexpectedElementType
-                                      (fromYamlPosition ann)
-                                      ("[" ++ show (typeOf (undefined :: a)) ++ "]")
-                                      "Mapping"
-                   go (Scalar ann _) = 
-                       throwError $ UnexpectedElementType
-                                      (fromYamlPosition ann)
-                                      ("[" ++ show (typeOf (undefined :: a)) ++ "]")
-                                      "Scalar"
+                   go (Mapping ann _) = err ann "Mapping"
+                   go (Scalar ann _) = err ann "Scalar"
+
+instance (Typeable a, FromYaml a) => FromYaml (Maybe a) where
+    fromYaml v = tryCache v go
+                 where
+                   err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) 
+                               ("Maybe (" ++ show (typeOf (undefined :: a)) ++ ")")
+                                s
+                   go (Mapping ann ((key, val):[])) 
+                       | key == T.pack "just" = Just `fmap` fromYaml val
+                       | otherwise = err ann "Mapping containing something other than only the key \"just\""
+                   go (Mapping ann []) = return Nothing
+                   go (Mapping ann _) = err ann "Mapping (containing something other than only the key \"just\")"
+                   go (Sequence ann xs) = err ann "Sequence"
+                   go (Scalar ann _) = err ann "Scalar"
+
+instance (Typeable a, FromYaml a, Typeable k, Read k, Ord k, Data TranslateFieldD (Map k a)) => FromYaml (Map k a) where
+    fromYaml v = tryCache v go where
+        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) 
+                    ("Map (" ++ show (typeOf (undefined :: k)) ++ ") (" ++ show (typeOf (undefined :: a)))
+                    s
+        go (Sequence ann _) = err ann "Sequence"
+        go (Scalar ann _) = err ann "Scalar"
+
+        go (Mapping ann ps) = 
+            let keysAttempts :: [[(k, String)]]
+                keysAttempts = map (reads . (cs :: Text -> String) . fst) ps in
+            case findIndex null keysAttempts of
+                Just i -> throwError $ CouldntReadScalar (fromYamlPosition ann) (show (typeOf (undefined :: k))) (cs . fst $ ps !! i)
+                Nothing -> do vs <- mapM (fromYaml . snd) ps
+                              return $ Map.fromList $ zip (map (fst . head) keysAttempts) vs
+
+
+instance (Typeable a, FromYaml a, Ord a) => FromYaml (Set a) where
+    fromYaml v = tryCache v go where
+        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("Set (" ++ show (typeOf (undefined :: a)) ++ ")") s
+        go (Scalar ann _) = err ann "Scalar"
+        go (Mapping ann _) = err ann "Mapping"
+        go (Sequence ann ss) = do
+          rss <- mapM fromYaml ss
+          return $ Set.fromList rss
+
+instance (IArray a e, Ix i, FromYaml i, FromYaml e, Typeable2 a, Typeable i, Typeable e) => FromYaml (a i e) where
+    fromYaml v = tryCache v go where
+        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("Array of some kind (" ++
+                                                                               show (typeOf (undefined :: i)) ++ ") (" ++
+                                                                               show (typeOf (undefined :: e))) s
+        go (Scalar ann _) = err ann "Scalar"
+        go (Sequence ann _) = err ann "Sequence"
+        go (Mapping ann ((bsKey, bs):(esKey,es):[]))
+                | bsKey /= T.pack "bounds" = err ann "Mapping whose first key is something other than \"bounds\""
+                | esKey /= T.pack "elems" = err ann "Mapping whose second key is something other than \"elems\""
+                | otherwise = do rbs <- fromYaml bs
+                                 res <- fromYaml es
+                                 return $ array rbs res
+
+instance (FromYaml a, Typeable a, FromYaml b, Typeable b) => FromYaml (a, b) where
+    fromYaml v = tryCache v go where
+        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("(" ++ show (typeOf (undefined :: a)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: b)) ++ ")") s
+        go (Scalar ann _) = err ann "Scalar"
+        go (Mapping ann _) = err ann "Mapping"
+        go (Sequence ann (a:b:[])) =
+            do ra <- fromYaml a
+               rb <- fromYaml b
+               return $ (ra, rb)
+        go (Sequence ann _) = err ann "Sequence of length other than 2"
+
+instance (FromYaml a, Typeable a, FromYaml b, Typeable b, FromYaml c, Typeable c) => FromYaml (a, b, c) where
+    fromYaml v = tryCache v go where
+        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("(" ++ show (typeOf (undefined :: a)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: b)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: c)) ++ ")") s 
+        go (Scalar ann _) = err ann "Scalar"
+        go (Mapping ann _) = err ann "Mapping"
+        go (Sequence ann (a:b:c:[])) =
+            do ra <- fromYaml a
+               rb <- fromYaml b
+               rc <- fromYaml c
+               return $ (ra, rb, rc)
+        go (Sequence ann _) = err ann "Sequence of length other than 3"
+
+
+instance (FromYaml a, Typeable a, FromYaml b, Typeable b, FromYaml c, Typeable c, FromYaml d, Typeable d) => FromYaml (a, b, c, d) where
+    fromYaml v = tryCache v go where
+        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("(" ++ show (typeOf (undefined :: a)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: b)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: c)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: d)) ++ ")") s 
+        go (Scalar ann _) = err ann "Scalar"
+        go (Mapping ann _) = err ann "Mapping"
+        go (Sequence ann (a:b:c:d:[])) =
+            do ra <- fromYaml a
+               rb <- fromYaml b
+               rc <- fromYaml c
+               rd <- fromYaml d
+               return $ (ra, rb, rc, rd)
+        go (Sequence ann _) = err ann "Sequence of length other than 4"
+
+instance (FromYaml a, Typeable a, FromYaml b, Typeable b, FromYaml c, Typeable c, FromYaml d, Typeable d, FromYaml e, Typeable e) => FromYaml (a, b, c, d, e) where
+    fromYaml v = tryCache v go where
+        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("(" ++ show (typeOf (undefined :: a)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: b)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: c)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: d)) ++ ", "
+                                                                                   ++ show (typeOf (undefined :: e)) ++ ")") s 
+        go (Scalar ann _) = err ann "Scalar"
+        go (Mapping ann _) = err ann "Mapping"
+        go (Sequence ann (a:b:c:d:e:[])) =
+            do ra <- fromYaml a
+               rb <- fromYaml b
+               rc <- fromYaml c
+               rd <- fromYaml d
+               re <- fromYaml e
+               return $ (ra, rb, rc, rd, re)
+        go (Sequence ann _) = err ann "Sequence of length other than 5"
 
 
 -- todo: I suppose I'm ready to start filling out these instances...
