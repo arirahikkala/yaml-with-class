@@ -39,7 +39,7 @@ import qualified Data.Text.Lazy
 import qualified Data.ByteString
 import qualified Data.ByteString.Lazy
 
-import Data.Convertible.Text (cs)
+import Data.Convertible
 import Data.Data
 
 --import Control.Monad.Trans.Class
@@ -67,6 +67,8 @@ data YamlScalar = YamlScalar
     deriving (Show, Typeable)
 
 type FromYamlObject = YamlObject FromYamlAnnotation YamlScalar YamlScalar
+
+cs = convert
 
 -- | Merge assoc-lists by keys.
 -- First list overrides second:

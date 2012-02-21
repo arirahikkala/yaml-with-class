@@ -26,13 +26,13 @@
 
 module Data.YamlObject (
 -- * Simple use
-        makeYaml, ToYamlObject, unmakeYaml, FromYamlObject, FromYamlException (..),
+        makeYaml, ToYamlObject, unmakeYaml, FromYamlObject, FromYamlException (..), TranslateField(..), 
 -- * Support for ephemeral data
         AllowExclusion(..),
 -- * Sharing
         DoShare(..), cleanUpReferences,
 -- * Specialized instances 
-        YamlObject (..), Anchor (..), ToYamlAnnotation(..), FromYamlAnnotation(..), mapKeysValues, mapKeysValuesA, mapKeysValuesM) where
+        ToYaml (..), FromYaml (..), ToYamlM, FromYamlM, YamlObject (..), Anchor (..), ToYamlAnnotation(..), FromYamlAnnotation(..), mapKeysValues, mapKeysValuesA, mapKeysValuesM) where
 
 import Data.Generics.SYB.WithClass.Basics
 import Data.Generics.SYB.WithClass.Instances
@@ -56,7 +56,7 @@ import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 
-import Data.Array.IArray
+import Data.Array
 --import Data.Array.Unboxed (UArray)
 --import qualified Data.Array.Unboxed as Unboxed
 import Data.Ratio
@@ -65,8 +65,8 @@ import Numeric (readFloat)
 import qualified Data.HashMap as Hash
 import Data.Dynamic
 
-import Data.List (find, findIndex)
-
+import Data.List (find, findIndex, sortBy)
+import Data.Ord (comparing)
 import Data.Monoid (getFirst, First(First), mappend)
 
 import qualified Data.Text as T
@@ -310,7 +310,7 @@ instance ToYaml Double where
 
 
 -- This way seems the most reasonable. Falling back on the generic instance would just output 'Scalar ":%"', and dividing into a float would lose precision (and if you were using Rational you might actually have been using it)
-instance (Integral a, TranslateField a, Typeable a) => ToYaml (Ratio a) where
+instance (Integral a, Show a, TranslateField a, Typeable a) => ToYaml (Ratio a) where
     toYaml i = do
       num <- toScalar $ cs $ show $ numerator i
       denom <- toScalar $ cs $ show $ denominator i
@@ -329,7 +329,7 @@ instance (Typeable a, ToYaml a) => ToYaml (Maybe a) where
                                 toMapping [(T.pack "just", inside)]
                  Nothing -> toMapping []
 
-instance (ToYaml a, TranslateField a, Show k, Data TranslateFieldD (Map k a))
+instance (ToYaml a, TranslateField a, Show k, Typeable a, Typeable k)
          => ToYaml (Map k a) where
     toYaml x =
         do vals <- mapM toYaml $ Map.elems x
@@ -343,7 +343,8 @@ instance (ToYaml a, Typeable a) => ToYaml (Set a) where
 instance (ToYaml a, TranslateField a, Typeable a) => ToYaml [a] where
     toYaml xs = toSequence =<< mapM toYaml xs
 
-instance (IArray a e, Ix i, ToYaml e, Typeable e, Typeable i, Typeable2 a, ToYaml i) => ToYaml (a i e) where
+-- todo: Generic array instance. I actually had one earlier, but it was causing weird type errors in some client code. Will have to figure out what the hell was going on with that.
+instance (Ix i, ToYaml e, Typeable e, Typeable i, ToYaml i) => ToYaml (Array i e) where
     toYaml a =
         do bs <- toYaml $ bounds a
            es <- toYaml $ elems a
@@ -545,6 +546,13 @@ instance FromYaml Float where
 instance FromYaml Double where
     fromYaml v = tryCache v scalarFromYamlAttempt
 
+instance FromYaml Char where
+    fromYaml v = tryCache v go where
+                       err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) "Char" s
+                       go (Sequence ann xs) = err ann "Sequence"
+                       go (Mapping ann xs) = err ann "Mapping"
+                       go (Scalar ann c) = if T.length c == 1 then return (T.head c) else err ann "Scalar (wanted one of precisely one character)"
+
 instance FromYaml [Char] where
     fromYaml v = tryCache v scalarFromYamlAttempt
 
@@ -571,7 +579,7 @@ instance (Typeable a, FromYaml a) => FromYaml (Maybe a) where
                    go (Sequence ann xs) = err ann "Sequence"
                    go (Scalar ann _) = err ann "Scalar"
 
-instance (Typeable a, FromYaml a, Typeable k, Read k, Ord k, Data TranslateFieldD (Map k a)) => FromYaml (Map k a) where
+instance (Typeable a, FromYaml a, Typeable k, Read k, Ord k) => FromYaml (Map k a) where
     fromYaml v = tryCache v go where
         err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) 
                     ("Map (" ++ show (typeOf (undefined :: k)) ++ ") (" ++ show (typeOf (undefined :: a)))
@@ -597,19 +605,21 @@ instance (Typeable a, FromYaml a, Ord a) => FromYaml (Set a) where
           rss <- mapM fromYaml ss
           return $ Set.fromList rss
 
-instance (IArray a e, Ix i, FromYaml i, FromYaml e, Typeable2 a, Typeable i, Typeable e) => FromYaml (a i e) where
+instance (Ix i, FromYaml i, FromYaml e, Typeable i, Typeable e) => FromYaml (Array i e) where
     fromYaml v = tryCache v go where
-        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("Array of some kind (" ++
+        err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("Array (" ++
                                                                                show (typeOf (undefined :: i)) ++ ") (" ++
-                                                                               show (typeOf (undefined :: e))) s
+                                                                               show (typeOf (undefined :: e)) ++ ")") s
         go (Scalar ann _) = err ann "Scalar"
         go (Sequence ann _) = err ann "Sequence"
-        go (Mapping ann ((bsKey, bs):(esKey,es):[]))
-                | bsKey /= T.pack "bounds" = err ann "Mapping whose first key is something other than \"bounds\""
-                | esKey /= T.pack "elems" = err ann "Mapping whose second key is something other than \"elems\""
+        go (Mapping ann xs@(_:_:[])) = correctLength ann (sortBy (comparing fst) xs)
+        go (Mapping ann _) = err ann "Mapping with a different number of elements than 2"
+        correctLength ann ((bsKey,bs):(esKey,es):[])
+                | bsKey /= T.pack "bounds" = err ann "Mapping whose first key (after sorting) is something other than \"bounds\""
+                | esKey /= T.pack "elems" = err ann "Mapping whose second key (after sorting) is something other than \"elems\""
                 | otherwise = do rbs <- fromYaml bs
                                  res <- fromYaml es
-                                 return $ array rbs res
+                                 return $ listArray rbs res
 
 instance (FromYaml a, Typeable a, FromYaml b, Typeable b) => FromYaml (a, b) where
     fromYaml v = tryCache v go where
@@ -673,7 +683,7 @@ instance (FromYaml a, Typeable a, FromYaml b, Typeable b, FromYaml c, Typeable c
         go (Sequence ann _) = err ann "Sequence of length other than 5"
 
 
--- todo: I suppose I'm ready to start filling out these instances...
+-- todo: Some instances might be missing, I think at least the one for Ratio...
 
 {- Note that references to references are OK, as references can only be made to earlier data, and at any point in the data all earlier references will already have been resolved to their target. Anchors containing anchors need to be specially handled by tryCache though (as do anchors containing references). Though I'm not sure if those even occur in YamlPickle-generated trees or if they're just an artifact of the overly permissive datatype.
 
