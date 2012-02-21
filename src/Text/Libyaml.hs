@@ -35,6 +35,7 @@ import Control.Monad
 import Foreign.C
 import Foreign.Ptr
 import Foreign.ForeignPtr
+import qualified Foreign.ForeignPtr.Unsafe as UnsafePtr
 import Foreign.Marshal.Alloc
 import Data.Data
 
@@ -152,7 +153,7 @@ foreign import ccall unsafe "&fclose_helper"
 
 withForeignPtr' :: MonadIO m => ForeignPtr a -> (Ptr a -> m b) -> m b
 withForeignPtr' fp f = do
-    r <- f $ unsafeForeignPtrToPtr fp
+    r <- f $ UnsafePtr.unsafeForeignPtrToPtr fp
     liftIO $ touchForeignPtr fp
     return r
 
