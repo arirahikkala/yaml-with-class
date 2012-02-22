@@ -313,7 +313,7 @@ instance ToYaml Double where
 
 
 -- This way seems the most reasonable. Falling back on the generic instance would just output 'Scalar ":%"', and dividing into a float would lose precision (and if you were using Rational you might actually have been using it)
-instance (Integral a, Show a, TranslateField a, Typeable a) => ToYaml (Ratio a) where
+instance (Integral a, Show a, Typeable a) => ToYaml (Ratio a) where
     toYaml i = do
       num <- toScalar $ cs $ show $ numerator i
       denom <- toScalar $ cs $ show $ denominator i
@@ -332,7 +332,7 @@ instance (Typeable a, ToYaml a) => ToYaml (Maybe a) where
                                 toMapping [(T.pack "just", inside)]
                  Nothing -> toMapping []
 
-instance (ToYaml a, TranslateField a, Show k, Typeable a, Typeable k)
+instance (ToYaml a, Show k, Typeable a, Typeable k)
          => ToYaml (Map k a) where
     toYaml x =
         do vals <- mapM toYaml $ Map.elems x
@@ -343,7 +343,7 @@ instance (ToYaml a, Typeable a) => ToYaml (Set a) where
         do vals <- mapM toYaml $ Set.elems a
            toSequence vals
  
-instance (ToYaml a, TranslateField a, Typeable a) => ToYaml [a] where
+instance (ToYaml a, Typeable a) => ToYaml [a] where
     toYaml xs = toSequence =<< mapM toYaml xs
 
 -- todo: Generic array instance. I actually had one earlier, but it was causing weird type errors in some client code. Will have to figure out what the hell was going on with that.
@@ -383,7 +383,7 @@ instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c, ToYa
            er <- toYaml e
            toSequence [ar, br, cr, dr, er]
 
-instance (Data ToYamlD t, TranslateField t) => ToYaml t where
+instance (Data ToYamlD t, TranslateField t, DoShare t) => ToYaml t where
     toYaml x = genericToYaml x
 
 getFields :: Data ToYamlD a => a -> [Text]
@@ -392,7 +392,7 @@ getFields = map T.pack . constrFields . (toConstr toYamlProxy)
 typename x = dataTypeName (dataTypeOf toYamlProxy x)
 
 genericToYaml :: forall a.
-                 (Data ToYamlD a, ToYaml a, TranslateField a) => 
+                 (Data ToYamlD a, ToYaml a, TranslateField a, DoShare a) => 
                  a
               -> ToYamlM (YamlObject ToYamlAnnotation Text Text)
 

@@ -7,6 +7,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE DoAndIfThenElse #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 module Text.YamlPickle
     ( encode, encodeFile, decode, decodeFile, ParseException (..), YamlScalar (..))
 {-
