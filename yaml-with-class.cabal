@@ -43,7 +43,7 @@ Library
   Exposed-modules: Text.YamlPickle, Data.DynStableName, Data.YamlObject
   Other-modules: Text.Libyaml
   -- Packages needed in order to build this package.
-  Build-depends: hashmap == 1.2.*, enumerator == 0.4.*, mtl == 2.*, transformers == 0.2.*, convertible-text == 0.3.*, bytestring == 0.9.*, text == 0.*, failure == 0.1.*, containers == 0.4.*, base == 4.*, array == 0.3.*, attempt == 0.3.*, syb-with-class == 0.6.*
+  Build-depends: hashmap, enumerator, mtl, transformers, convertible, bytestring, text, failure, containers, base, array, attempt, syb-with-class
 
   -- Modules not exported by this package.
   -- Other-modules:       

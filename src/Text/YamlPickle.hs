@@ -114,6 +114,24 @@ instance IsYamlScalar Data.ByteString.Lazy.ByteString where
     fromYamlScalar = cs . value
     toYamlScalar b = YamlScalar (cs b) NoTag Any
 
+-- these instances should not exist!
+instance Convertible Data.ByteString.ByteString String where
+    safeConvert = Right . map (toEnum . fromEnum) . Data.ByteString.unpack
+
+instance Convertible String Data.ByteString.ByteString where
+    safeConvert = Right . Data.ByteString.pack . map (toEnum . fromEnum)
+
+instance Convertible Data.ByteString.ByteString Data.Text.Lazy.Text where
+    safeConvert = convertVia (undefined :: String)
+
+instance Convertible Data.ByteString.ByteString Data.Text.Text where
+    safeConvert = convertVia (undefined :: String)
+
+instance Convertible Data.Text.Lazy.Text Data.ByteString.ByteString where
+    safeConvert = convertVia (undefined :: String)
+
+instance Convertible Data.Text.Text Data.ByteString.ByteString where
+    safeConvert = convertVia (undefined :: String)
 
 toYamlObject :: IsYamlScalar k
              => IsYamlScalar v

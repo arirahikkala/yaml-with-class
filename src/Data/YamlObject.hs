@@ -8,6 +8,7 @@
 {-# LANGUAGE DoRec #-} 
 {-# LANGUAGE DeriveDataTypeable #-} 
 {-# LANGUAGE DoAndIfThenElse  #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 -- todo:
 -- test if AllowExclusion works
 -- add usingCache to all ToYaml instances
@@ -46,7 +47,7 @@ import Control.Monad.State
 import Control.Monad.Trans.Class
 
 import Data.Attempt
-import Data.Convertible.Text
+import Data.Convertible
 import Control.Monad.Error
 import Control.Monad.Identity
 import Control.Exception
@@ -111,6 +112,8 @@ type ToYamlObject = YamlObject ToYamlAnnotation Text Text
 -- YamlObject keys and values, and in any case having surrogate anchors around
 -- would complicate it
 data Anchor = Surrogate Int | Original Text deriving (Eq, Ord, Show)
+
+cs = convert
 
 -- | Apply a conversion to both the keys and values of an 'YamlObject'.
 mapKeysValues :: (kIn -> kOut)
@@ -503,18 +506,19 @@ instance AllowExclusion a where
     allowExclusion _ _ = False
 
 
-scalarFromYamlAttempt :: forall t k x. (ConvertAttempt String t, Typeable t, Show t) => YamlObject FromYamlAnnotation Text Text -> FromYamlM t
+scalarFromYamlAttempt :: forall t k x. (Convertible String t, Typeable t, Show t) => YamlObject FromYamlAnnotation Text Text -> FromYamlM t
 scalarFromYamlAttempt (Scalar ann n) =
-    case (ca :: String -> Attempt t) $ cs n of
-      Success v -> return v
-      e -> throwError $ CouldntReadScalar (fromYamlPosition ann) (show $ typeOf (undefined :: t)) (cs n) 
+    case (safeConvert :: String -> ConvertResult t) $ convert n of
+      Right v -> return v
+      Left e -> throwError $ CouldntReadScalar (fromYamlPosition ann) (show $ typeOf (undefined :: t)) (cs n) 
+
 scalarFromYamlAttempt e = 
     throwError $ UnexpectedElementType
                    (fromYamlPosition (annotation e))
                    (show (typeOf (undefined :: t)))
                    (head . words . show $ e)
 
-scalarFromYaml :: forall t k x. (ConvertSuccess String t, Typeable t) => YamlObject FromYamlAnnotation Text Text -> FromYamlM t
+scalarFromYaml :: forall t k x. (Convertible String t, Typeable t) => YamlObject FromYamlAnnotation Text Text -> FromYamlM t
 scalarFromYaml (Scalar ann n) =
     return $ (cs :: String -> t) $ cs n
 scalarFromYaml e = 
@@ -529,18 +533,45 @@ instance FromYaml Int where
 instance FromYaml Integer where
     fromYaml v = tryCache v scalarFromYamlAttempt
 
-instance ConvertAttempt [Char] Float where
-    convertAttempt s = 
+instance Convertible [Char] Float where
+    safeConvert s = 
         case readFloat s of
-          [(v, "")] -> Success v
-          _ -> failureString ("Invalid Float: " ++ s)
+          [(v, "")] -> Right v
+          _ -> convError ("Invalid Float: ") s
 
-instance ConvertAttempt [Char] Double where
-    convertAttempt s = 
+instance Convertible [Char] Double where
+    safeConvert s = 
         case readFloat s of
+          [(v, "")] -> Right v
+          _ -> convError ("Invalid Double: ") s
+
+instance Convertible [Char] Int where
+    safeConvert s = 
+        case reads s of
+          [(v, "")] -> Right v
+          _ -> convError ("Invalid Int: " ++ s) s
+
+instance Convertible [Char] Integer where
+    safeConvert s = 
+        case reads s of
+          [(v, "")] -> Right v
+          _ -> convError ("Invalid Integer: " ++ s) s
+
+instance Convertible Int String where
+    safeConvert = Right . show
+
+instance Convertible String String where
+    safeConvert = Right 
+
+instance Convertible Int Text where
+    safeConvert = convertVia (undefined :: String)
+{-
+instance Convert [Char] Int where
+    safeConvert s = 
+        case reads s of
           [(v, "")] -> Success v
           _ -> failureString ("Invalid Double: " ++ s)
-
+-}
 instance FromYaml Float where
     fromYaml v = tryCache v scalarFromYamlAttempt
 instance FromYaml Double where
@@ -731,7 +762,7 @@ genericFromYaml yamlData =
               Nothing -> throwError $ UnexpectedElementType
                          (fromYamlPosition (annotation yamlData'))
                          ("a constructor of " ++ show datatype)
-                         (convertSuccess v)
+                         (convert v)
               Just c -> a c
         constructField :: 
             (Data FromYamlD x) =>
@@ -761,7 +792,7 @@ genericFromYaml yamlData =
                   case o' of
                     Mapping ann as -> 
                         withConstructor v cs (\c -> evalStateT (fromConstrM fromYamlProxy (constructField (fromYamlPosition ann) (show datatype)) c)
-                                              (as, map (convertSuccess . translateFieldD'' dict dummy) $ constrFields c))
+                                              (as, map (convert . translateFieldD'' dict dummy) $ constrFields c))
                     Sequence ann as ->
                         withConstructor v cs (\c -> evalStateT (fromConstrM fromYamlProxy (constructUnnamedParameter (fromYamlPosition ann) (show datatype)) c)
                                                                 as)
