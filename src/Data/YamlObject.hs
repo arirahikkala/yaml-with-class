@@ -281,7 +281,7 @@ toSequence xs = return $ Sequence (ToYamlAnnotation ()) xs
 
 
 usingCache
-  :: (ToYaml a) =>
+  :: (Data ToYamlD a) =>
      a
      -> ToYamlM (YamlObject ToYamlAnnotation k v)
      -> ToYamlM (YamlObject ToYamlAnnotation k v)
@@ -392,7 +392,7 @@ getFields = constrFields . (toConstr toYamlProxy)
 typename x = dataTypeName (dataTypeOf toYamlProxy x)
 
 genericToYaml :: forall a.
-                 (Data ToYamlD a, ToYaml a, TranslateField a, DoShare a) => 
+                 (Data ToYamlD a, TranslateField a, DoShare a) => 
                  a
               -> ToYamlM (YamlObject ToYamlAnnotation Text Text)
 
