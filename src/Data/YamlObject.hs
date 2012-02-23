@@ -6,9 +6,13 @@
 {-# LANGUAGE MultiParamTypeClasses #-} 
 {-# LANGUAGE GeneralizedNewtypeDeriving #-} 
 {-# LANGUAGE DoRec #-} 
-{-# LANGUAGE DeriveDataTypeable #-} 
 {-# LANGUAGE DoAndIfThenElse  #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
+{-# LANGUAGE DeriveDataTypeable #-} 
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DefaultSignatures #-}
+
+
 -- todo:
 -- test if AllowExclusion works
 -- add usingCache to all ToYaml instances
@@ -25,20 +29,21 @@
 -}
 
 
-module Data.YamlObject (
+module Data.YamlObject {- (
 -- * Simple use
         makeYaml, ToYamlObject, unmakeYaml, FromYamlObject, FromYamlException (..), TranslateField(..), 
 -- * Support for ephemeral data
         AllowExclusion(..),
 -- * Sharing
-        DoShare(..), cleanUpReferences,
+        cleanUpReferences,
 -- * Specialized instances 
-        ToYaml (..), FromYaml (..), ToYamlM, FromYamlM, YamlObject (..), Anchor (..), ToYamlAnnotation(..), FromYamlAnnotation(..), mapKeysValues, mapKeysValuesA, mapKeysValuesM) where
+        ToYaml (..), FromYaml (..), ToYamlM, FromYamlM, YamlObject (..), Anchor (..), ToYamlAnnotation(..), FromYamlAnnotation(..), mapKeysValues, mapKeysValuesA, mapKeysValuesM) -} where
 
-import Data.Generics.SYB.WithClass.Basics
-import Data.Generics.SYB.WithClass.Instances
-import Data.Generics.SYB.WithClass.Context
-import Data.Generics.SYB.WithClass.Derive
+import Data.YamlObject.Types
+import Data.YamlObject.Generic
+import Data.YamlObject.Support
+
+import Data.ConvertibleInstances ()
 import Control.Arrow
 
 import System.IO.Unsafe
@@ -58,10 +63,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Data.Array
---import Data.Array.Unboxed (UArray)
---import qualified Data.Array.Unboxed as Unboxed
 import Data.Ratio
-import Numeric (readFloat)
 
 import qualified Data.HashMap as Hash
 import Data.Dynamic
@@ -79,41 +81,6 @@ import Text.Libyaml (Position(..))
 import Control.Applicative
 import Data.Traversable (traverse)
 
-{- |
-   YamlObject is a representation of general data in a way that's highly
-   palatable to YAML, especially the yaml package on Hackage.. It's based on
-   Data.Object.Object but extends it with explicit sharing and with annotations
-   that can be used to carry things like source position and style information.
--}
-data YamlObject ann k v
-    = Scalar { annotation :: ann, value :: v }
-    | Sequence { annotation :: ann, contents :: [YamlObject ann k v] }
-    | Mapping { annotation :: ann, contentPairs :: [(k, YamlObject ann k v)] }
-    | Reference { annotation :: ann, anchor :: Anchor }
-    -- | The yaml package doesn't see anchors as separate events, so they don't
-    -- get per-event information - and hence, no annotations either
-    | Anchor { anchor :: Anchor, content :: (YamlObject ann k v) }
-      deriving (Eq, Show)
-
--- | annotation type for parsing YAML, recording source positions
-data FromYamlAnnotation = 
-    FromYamlAnnotation { fromYamlPosition :: Position } deriving Show
--- | currently no annotations for encoding
-data ToYamlAnnotation = ToYamlAnnotation () deriving (Show)
-
-type FromYamlObject = YamlObject FromYamlAnnotation Text Text
-type ToYamlObject = YamlObject ToYamlAnnotation Text Text
-
--- | Surrogate anchors are anchors generated in the parsing code, used to
--- implement data merges (i.e. the <<) syntax. Originals are just 
--- YAML anchors.
--- 
--- Note that there's not really any need to parametrise Anchors like
--- YamlObject keys and values, and in any case having surrogate anchors around
--- would complicate it
-data Anchor = Surrogate Int | Original Text deriving (Eq, Ord, Show)
-
-cs = convert
 
 -- | Apply a conversion to both the keys and values of an 'YamlObject'.
 mapKeysValues :: (kIn -> kOut)
@@ -152,30 +119,12 @@ mapKeysValuesM fk fv =
         fv' = WrapMonad . fv
      in unwrapMonad . mapKeysValuesA fk' fv'
 
--- Copied from RJson
 
-class TranslateField a where
-    -- | This method defines the mapping from Haskell record field names
-    --   to YAML object field names. The default is to strip any initial
-    --   underscores. Specialize this method to define a different behavior.
-    translateField :: a -> String -> String
-
-data TranslateFieldD a = TranslateFieldD { 
-      translateFieldD :: a -> String -> String
-}
-
-translateFieldProxy :: Proxy TranslateFieldD
-translateFieldProxy =
-    error "'translateFieldProxy' value should never be evaluated!"
-
-instance (TranslateField t) => Sat (TranslateFieldD t) where
-    dict = TranslateFieldD { translateFieldD = translateField }
+instance TranslateField a where
+    translateField _ x = x
 
 -- | Removes initial underscores from a string.
 stripInitialUnderscores = T.dropWhile (=='_')
-
-instance Typeable a => TranslateField a where
-    translateField _ x = cs . stripInitialUnderscores . cs $ x
 
 -- todo: Some kind of a nice tree fold would make this shorter, possibly
 -- | Removes unused anchors. Note that this function forces the structure of the
@@ -202,29 +151,7 @@ cleanUpReferences o =
         go refs s@(Reference {}) = s
     in go usedReferences o
 
-class DoShare a where
-    doShare :: a -> Bool
 
-data DoShareD a = DoShareD { doShareD :: a -> Bool }
-
-doShareProxy :: Proxy DoShareD
-doShareProxy = error "doShareProxy should never be evaluated!"
-
-instance (DoShare t) => Sat (DoShareD t) where
-    dict = DoShareD { doShareD = doShare }
-
-instance Typeable a => DoShare a where
-    doShare = const False
-
-data ToYamlState = ToYamlState {
-      nextId :: Int
-    , cache :: Map Int [(DynStableName, Int)]
-}
-
-newtype ToYamlT m a = ToYamlT { unToYamlT :: StateT ToYamlState m a }
-    deriving (Monad, Functor)
-
-type ToYamlM = ToYamlT Identity
 
 evalToYamlT :: Monad m => ToYamlT m a -> ToYamlState -> m a
 evalToYamlT (ToYamlT a) s = evalStateT a s
@@ -236,36 +163,38 @@ runToYamlT (ToYamlT a) s = runStateT a s
 --
 -- | New instances can be added to this class to customize certain aspects
 --   of the way in which Haskell types are serialized to JSON.
-class (TranslateField a, DoShare a) => ToYaml a where
-    toYaml :: a -> ToYamlM (YamlObject ToYamlAnnotation Text Text)
-    -- | Applies to record types only. You can specialize this method to
-    --   prevent certain fields from being serialized.
-    --   Given a Haskell field name, it should return True if that field is
-    --   to be serialized, and False otherwise.
-    exclude  :: a -> String -> Bool
-    exclude _ _ = False
 
 
--- Note the inclusion of translateField from TranslateField.
 
 
-data ToYamlD a = ToYamlD { toYamlD   :: a -> ToYamlM (YamlObject ToYamlAnnotation Text Text),
-                           excludeD         :: a -> String -> Bool,
-                           translateFieldD' :: a -> String -> String,
-                           doShareD'        :: a -> Bool}
+instance ToYaml Int where
+    toYaml x = {-usingCache x-} (toScalar . convert $ x)
 
-toYamlProxy :: Proxy ToYamlD
-toYamlProxy = error "'toYamlProxy' value should never be evaluated!"
-
--- Again, note inclusion of translateField from TranslateField.
-instance ToYaml t => Sat (ToYamlD t) where
-    dict = ToYamlD { toYamlD   = toYaml,
-                     excludeD         = exclude,
-                     translateFieldD' = translateField,
-                     doShareD'        = doShare}
+makeYaml :: ToYaml a => 
+            a ->
+            ToYamlObject
+makeYaml x = runIdentity $ evalToYamlT (toYaml x) (ToYamlState 0 Map.empty)
 
 
---
+{-
+genericToYaml x
+    | isAlgType (dataTypeOf toYamlProxy x) =
+        usingCache x $
+        withConstructorName x $
+        case getFields x of
+          [] ->
+              do rs <- sequence $ gmapQ toYamlProxy (toYamlD dict) x
+                 toSequence rs
+          fs ->
+              let
+                translatedFsToInclude =
+                  {-map (T.pack . translateFieldD' dict x)-} (filter (not . (excludeD dict x)) (getFields x))
+              in do rs <- sequence $ gmapQ toYamlProxy (toYamlD dict) x
+                    toMapping $ zip (map T.pack $ (getFields x)) rs
+    | otherwise =
+        error $ "Unable to serialize the primitive type '" ++ typename x ++ "'"
+-}
+
 -- Implementations of toYaml for different data types.
 --
 {-
@@ -273,35 +202,10 @@ instance ToYaml Bool where
     toYaml True = return $ Scalar $ T.pack "true"
     toYaml False = return $ Scalar $ T.pack "false"
 -}
-toScalar x = return $ Scalar (ToYamlAnnotation ()) x
-toReference x = return $ Reference (ToYamlAnnotation ()) x
-toAnchor a x = return $ Anchor a x
-toMapping xs = return $ Mapping (ToYamlAnnotation ()) xs
-toSequence xs = return $ Sequence (ToYamlAnnotation ()) xs
+{-
 
 
-usingCache
-  :: (Data ToYamlD a) =>
-     a
-     -> ToYamlM (YamlObject ToYamlAnnotation k v)
-     -> ToYamlM (YamlObject ToYamlAnnotation k v)
-usingCache x cont =
-    do (ToYamlState index m) <- ToYamlT get
-       if doShareD' dict x
-       then let name = unsafePerformIO $ makeDynStableName $! x
-                hash = hashDynStableName name in
-            case do vals <- Map.lookup hash m
-                    lookup name vals of
-              Nothing -> do ToYamlT $ modify (\e -> e {nextId = succ (nextId e),
-                                                       cache = Map.insertWith (++) hash [(name, index)] (cache e)})
-                            v <- cont
-                            toAnchor (Original (cs index)) v
-              Just index -> toReference (Original $ cs index)
-       else cont
 
-
-instance ToYaml Int where
-    toYaml x = usingCache x (toScalar . cs . show $ x)
 
 
 instance ToYaml Integer where
@@ -407,9 +311,9 @@ genericToYaml x
           fs ->
               let
                 translatedFsToInclude =
-                  map (T.pack . translateFieldD' dict x) (filter (not . (excludeD dict x)) (getFields x))
+                  {-map (T.pack . translateFieldD' dict x)-} (filter (not . (excludeD dict x)) (getFields x))
               in do rs <- sequence $ gmapQ toYamlProxy (toYamlD dict) x
-                    toMapping $ zip translatedFsToInclude rs
+                    toMapping $ zip (map T.pack $ (getFields x)) rs
     | otherwise =
         error $ "Unable to serialize the primitive type '" ++ typename x ++ "'"
 
@@ -424,11 +328,13 @@ withConstructorName x cont =
    can be encoded into streams of YAML text using 'Text.YamlPickle.encode'.
 
 -}
-makeYaml :: ToYaml a => 
-            a ->
-            ToYamlObject
-makeYaml x = runIdentity $ evalToYamlT (toYaml x) (ToYamlState 0 Map.empty)
+-}
 
+{-
+-- | annotation type for parsing YAML, recording source positions
+data FromYamlAnnotation = 
+    FromYamlAnnotation { fromYamlPosition :: Position } deriving Show
+type FromYamlObject = YamlObject FromYamlAnnotation Text Text
 
 data FromYamlState = FromYamlState { 
       refs :: Map.Map Anchor Dynamic
@@ -505,6 +411,13 @@ instance FromYaml t => Sat (FromYamlD t) where
 instance AllowExclusion a where
     allowExclusion _ _ = False
 
+instance FromYaml Int where
+    fromYaml v = tryCache v scalarFromYamlAttempt
+
+instance FromYaml Integer where
+    fromYaml v = tryCache v scalarFromYamlAttempt
+
+
 
 scalarFromYamlAttempt :: forall t k x. (Convertible String t, Typeable t, Show t) => YamlObject FromYamlAnnotation Text Text -> FromYamlM t
 scalarFromYamlAttempt (Scalar ann n) =
@@ -527,44 +440,6 @@ scalarFromYaml e =
                    (show (typeOf (undefined :: t)))
                    (head . words . show $ e)
 
-instance FromYaml Int where
-    fromYaml v = tryCache v scalarFromYamlAttempt
-
-instance FromYaml Integer where
-    fromYaml v = tryCache v scalarFromYamlAttempt
-
-instance Convertible [Char] Float where
-    safeConvert s = 
-        case readFloat s of
-          [(v, "")] -> Right v
-          _ -> convError ("Invalid Float: ") s
-
-instance Convertible [Char] Double where
-    safeConvert s = 
-        case readFloat s of
-          [(v, "")] -> Right v
-          _ -> convError ("Invalid Double: ") s
-
-instance Convertible [Char] Int where
-    safeConvert s = 
-        case reads s of
-          [(v, "")] -> Right v
-          _ -> convError ("Invalid Int: " ++ s) s
-
-instance Convertible [Char] Integer where
-    safeConvert s = 
-        case reads s of
-          [(v, "")] -> Right v
-          _ -> convError ("Invalid Integer: " ++ s) s
-
-instance Convertible Int String where
-    safeConvert = Right . show
-
-instance Convertible String String where
-    safeConvert = Right 
-
-instance Convertible Int Text where
-    safeConvert = convertVia (undefined :: String)
 {-
 instance Convert [Char] Int where
     safeConvert s = 
@@ -587,7 +462,7 @@ instance FromYaml Char where
 instance FromYaml [Char] where
     fromYaml v = tryCache v scalarFromYamlAttempt
 
-instance (Typeable a, FromYaml a) => FromYaml [a] where
+instance (Typeable a, Data FromYamlD a) => FromYaml [a] where
     fromYaml v = tryCache v go
                  where 
                    err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("[" ++ show (typeOf (undefined :: a)) ++ "]") s
@@ -596,7 +471,7 @@ instance (Typeable a, FromYaml a) => FromYaml [a] where
                    go (Mapping ann _) = err ann "Mapping"
                    go (Scalar ann _) = err ann "Scalar"
 
-instance (Typeable a, FromYaml a) => FromYaml (Maybe a) where
+instance (Typeable a, Data FromYamlD a) => FromYaml (Maybe a) where
     fromYaml v = tryCache v go
                  where
                    err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) 
@@ -610,7 +485,7 @@ instance (Typeable a, FromYaml a) => FromYaml (Maybe a) where
                    go (Sequence ann xs) = err ann "Sequence"
                    go (Scalar ann _) = err ann "Scalar"
 
-instance (Typeable a, FromYaml a, Typeable k, Read k, Ord k) => FromYaml (Map k a) where
+instance (Typeable a, Data FromYamlD a, Data FromYamlD k, Typeable k, Read k, Ord k) => FromYaml (Map k a) where
     fromYaml v = tryCache v go where
         err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) 
                     ("Map (" ++ show (typeOf (undefined :: k)) ++ ") (" ++ show (typeOf (undefined :: a)))
@@ -627,7 +502,7 @@ instance (Typeable a, FromYaml a, Typeable k, Read k, Ord k) => FromYaml (Map k 
                               return $ Map.fromList $ zip (map (fst . head) keysAttempts) vs
 
 
-instance (Typeable a, FromYaml a, Ord a) => FromYaml (Set a) where
+instance (Typeable a, Data FromYamlD a, Ord a) => FromYaml (Set a) where
     fromYaml v = tryCache v go where
         err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("Set (" ++ show (typeOf (undefined :: a)) ++ ")") s
         go (Scalar ann _) = err ann "Scalar"
@@ -636,7 +511,7 @@ instance (Typeable a, FromYaml a, Ord a) => FromYaml (Set a) where
           rss <- mapM fromYaml ss
           return $ Set.fromList rss
 
-instance (Ix i, FromYaml i, FromYaml e, Typeable i, Typeable e) => FromYaml (Array i e) where
+instance (Ix i, Data FromYamlD i, Data FromYamlD e, Typeable i, Typeable e) => FromYaml (Array i e) where
     fromYaml v = tryCache v go where
         err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("Array (" ++
                                                                                show (typeOf (undefined :: i)) ++ ") (" ++
@@ -652,7 +527,7 @@ instance (Ix i, FromYaml i, FromYaml e, Typeable i, Typeable e) => FromYaml (Arr
                                  res <- fromYaml es
                                  return $ listArray rbs res
 
-instance (FromYaml a, Typeable a, FromYaml b, Typeable b) => FromYaml (a, b) where
+instance (Data FromYamlD a, Typeable a, Data FromYamlD b, Typeable b) => FromYaml (a, b) where
     fromYaml v = tryCache v go where
         err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("(" ++ show (typeOf (undefined :: a)) ++ ", "
                                                                                    ++ show (typeOf (undefined :: b)) ++ ")") s
@@ -663,7 +538,7 @@ instance (FromYaml a, Typeable a, FromYaml b, Typeable b) => FromYaml (a, b) whe
                rb <- fromYaml b
                return $ (ra, rb)
         go (Sequence ann _) = err ann "Sequence of length other than 2"
-
+{-
 instance (FromYaml a, Typeable a, FromYaml b, Typeable b, FromYaml c, Typeable c) => FromYaml (a, b, c) where
     fromYaml v = tryCache v go where
         err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) ("(" ++ show (typeOf (undefined :: a)) ++ ", "
@@ -712,7 +587,7 @@ instance (FromYaml a, Typeable a, FromYaml b, Typeable b, FromYaml c, Typeable c
                re <- fromYaml e
                return $ (ra, rb, rc, rd, re)
         go (Sequence ann _) = err ann "Sequence of length other than 5"
-
+-}
 
 -- todo: Some instances might be missing, I think at least the one for Ratio...
 
@@ -720,7 +595,7 @@ instance (FromYaml a, Typeable a, FromYaml b, Typeable b, FromYaml c, Typeable c
 
 -}
 
-tryCache :: forall a. (FromYaml a, Typeable a) => YamlObject FromYamlAnnotation Text Text -> (YamlObject FromYamlAnnotation Text Text -> FromYamlM a) -> FromYamlM a
+tryCache :: forall a. (Data FromYamlD a, Typeable a) => YamlObject FromYamlAnnotation Text Text -> (YamlObject FromYamlAnnotation Text Text -> FromYamlM a) -> FromYamlM a
 tryCache (Anchor a v) cont = do 
   FromYamlState refs <- getFromYaml
   rec { putFromYaml (FromYamlState (Map.insert a (toDyn r) refs))
@@ -751,7 +626,7 @@ addDummyFromYamlAnnotations ::
 
 addDummyFromYamlAnnotations = mapAnnotations (const $ FromYamlAnnotation $ Position 0 0 0 0)
 
-genericFromYaml :: forall a. (Data FromYamlD a, FromYaml a, TranslateField a) => YamlObject FromYamlAnnotation Text Text -> FromYamlM a
+genericFromYaml :: forall a. (Data FromYamlD a, TranslateField a) => YamlObject FromYamlAnnotation Text Text -> FromYamlM a
 genericFromYaml yamlData =
     tryCache yamlData $ \yamlData' ->
     let dummy = undefined :: a
@@ -823,3 +698,5 @@ instance (Data FromYamlD t, TranslateField t) => FromYaml t where
 
 unmakeYaml :: FromYaml a => FromYamlObject -> Either FromYamlException a
 unmakeYaml a = runIdentity $ evalFromYamlT (fromYaml a) $ FromYamlState Map.empty
+
+-}

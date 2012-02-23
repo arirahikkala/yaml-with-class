@@ -1,28 +1,20 @@
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module Data.TestYamlObject where
 
-import Data.Generics.SYB.WithClass.Basics
-import Data.Generics.SYB.WithClass.Derive
 import Data.YamlObject
+import Data.YamlObject.Types
 import Debug.Trace
+import GHC.Generics
 
 data Foo = Foo {
       a :: Int
     , b :: Int 
 } | Bar Foo Foo
-    deriving Show
+    deriving (Show, Generic)
 
-instance DoShare Foo where
-    doShare _ = True
+data Baz = Baz Int Int Int deriving (Show, Generic)
 
-instance AllowExclusion Foo where
-    allowExclusion _ _ | trace "foo1" False = undefined
-    allowExclusion _ "a" = trace "foo" True
-    allowExclusion _ _ = False
-
-$( derive [''Foo] )
+instance ToYaml Foo where
+    share _ = True
+instance ToYaml Baz

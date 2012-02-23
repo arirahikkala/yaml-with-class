@@ -29,7 +29,7 @@ module Text.YamlPickle
 
 import qualified Text.Libyaml as Y
 import Text.Libyaml hiding (encode, decode, encodeFile, decodeFile, Anchor)
-import Data.YamlObject hiding (value, FromYamlObject, ToYamlObject)
+import Data.YamlObject hiding (value, FromYamlObject, ToYamlObject, cs)
 import Data.ByteString (ByteString)
 import qualified Data.Map as Map
 import System.IO.Unsafe (unsafePerformIO)
