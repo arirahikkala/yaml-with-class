@@ -213,7 +213,7 @@ doShareProxy = error "doShareProxy should never be evaluated!"
 instance (DoShare t) => Sat (DoShareD t) where
     dict = DoShareD { doShareD = doShare }
 
-instance DoShare a where
+instance Typeable a => DoShare a where
     doShare = const False
 
 data ToYamlState = ToYamlState {
@@ -386,8 +386,8 @@ instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c, ToYa
 instance (Data ToYamlD t, TranslateField t, DoShare t) => ToYaml t where
     toYaml x = genericToYaml x
 
-getFields :: Data ToYamlD a => a -> [Text]
-getFields = map T.pack . constrFields . (toConstr toYamlProxy)
+getFields :: Data ToYamlD a => a -> [String]
+getFields = constrFields . (toConstr toYamlProxy)
 
 typename x = dataTypeName (dataTypeOf toYamlProxy x)
 
@@ -407,7 +407,7 @@ genericToYaml x
           fs ->
               let
                 translatedFsToInclude =
-                  map (T.pack . translateFieldD' dict x . T.unpack) (filter (not . (excludeD dict x . T.unpack)) (getFields x))
+                  map (T.pack . translateFieldD' dict x) (filter (not . (excludeD dict x)) (getFields x))
               in do rs <- sequence $ gmapQ toYamlProxy (toYamlD dict) x
                     toMapping $ zip translatedFsToInclude rs
     | otherwise =
@@ -600,7 +600,7 @@ instance (Typeable a, FromYaml a) => FromYaml (Maybe a) where
     fromYaml v = tryCache v go
                  where
                    err ann s = throwError $ UnexpectedElementType (fromYamlPosition ann) 
-                               ("Maybe (" ++ show (typeOf (undefined :: a)) ++ ")")
+                               (show $ typeOf (undefined :: Maybe a))
                                 s
                    go (Mapping ann ((key, val):[])) 
                        | key == T.pack "just" = Just `fmap` fromYaml val
