@@ -2,15 +2,32 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DoRec #-}
 
 module Data.YamlObject.Types where
 
 import Data.Map (Map)
+import qualified Data.Map as Map (insert, lookup)
 import Data.DynStableName (DynStableName)
-import Control.Monad.State (StateT)
+import Control.Monad.State (StateT, get, put)
 import Control.Monad.Identity (Identity)
 import Data.Text (Text)
 import GHC.Generics
+import Control.Monad.Reader
+import Text.Libyaml (Position, AnchorName, Event)
+import Data.Map (Map)
+import Data.Dynamic (Dynamic)
+import Control.Monad.Error (ErrorT, MonadError, Error(..), throwError)
+import Control.Exception (Exception)
+import Data.Typeable (Typeable)
+import Control.Applicative (Applicative, Alternative)
+
+import Data.Dynamic (toDyn, fromDynamic, dynTypeRep)
+import Data.Typeable (typeOf)
 
 {- |
    YamlObject is a representation of general data in a way that's highly
@@ -39,24 +56,50 @@ data Anchor = Surrogate Int | Original Text deriving (Eq, Ord, Show)
 
 type ToYamlAction = ToYamlM ToYamlObject
 
-class (TranslateField a) => ToYaml a where
+-- | The Share class is used for controlling what things get anchors generated
+-- from them. If you are only outputting data that is small compared to the
+-- amount of memory you have to work with, you can try adding Share instances
+-- indiscriminately and going back and making things neater with
+-- cleanUpReferences. Otherwise, whatever object share returns True on will
+-- have an anchor to refer to it in the outputted document (unless replaced
+-- with a reference)
+class Share a where
+-- | If the instance of share for this type returns True when called,
+-- place an anchor everywhere values of this type are output, and a
+-- reference where the same value is used later. The argument
+-- is safe to evaluate.
+    share :: a -> Bool
+    share _ = False
+
+instance Share a where
+    share _ = False
+
+class Share a => ToYaml a where
     toYaml :: a -> ToYamlAction
     -- | Applies to record types only. You can specialize this method to
     --   prevent certain fields from being serialized.
     --   Given a Haskell field name, it should return False if that field is
     --   to be serialized, and True otherwise.
+    --   The first argument is a dummy and must not be evaluated..
     exclude  :: a -> Text -> Bool
     exclude _ _ = False
 
-    share :: a -> Bool
-    share _ = False
-
     default toYaml :: (Generic a, GToYaml (Rep a)) => a -> ToYamlAction
-    toYaml = gToYaml . from
+    toYaml x = runReaderT (gToYaml $ from x) (GToYamlDict (exclude :: a -> Text -> Bool) (share :: a -> Bool))
+
+-- there might be a more elegant way to do this than straight out dictionary passing, but I'm not sure I even want to know what it is
+data GToYamlDict a = GToYamlDict {
+      excludeD :: a -> Text -> Bool
+    , shareD :: a -> Bool
+}
+
 
 class GToYaml f where
-    gToYaml :: f a -> ToYamlAction
+    gToYaml ::
+           f a 
+        -> GToYamlAction a
 
+type GToYamlAction a = ReaderT (GToYamlDict a) ToYamlM ToYamlObject
 
 data ToYamlState = ToYamlState {
       nextId :: Int
@@ -73,11 +116,105 @@ newtype ToYamlT m a = ToYamlT { unToYamlT :: StateT ToYamlState m a }
 
 type ToYamlM = ToYamlT Identity
 
+data FromYamlAnnotation = 
+    FromYamlAnnotation { fromYamlPosition :: Position } deriving Show
+type FromYamlObject = YamlObject FromYamlAnnotation Text Text
 
-class TranslateField a where
-    -- | This method defines the mapping from Haskell record field names
-    --   to YAML object field names. The default is to strip any initial
-    --   underscores. Specialize this method to define a different behavior.
-    translateField :: a -> String -> String
+data FromYamlState = FromYamlState { 
+      refs :: Map Anchor Dynamic
+}
+newtype FromYamlT m a = FromYamlT { unFromYamlT :: ErrorT FromYamlException (StateT FromYamlState m) a }
+    deriving (Monad, Applicative, Alternative, MonadError FromYamlException, MonadFix, Functor)
+
+instance Error FromYamlException where
+    noMsg = OtherException "no message given"
+    strMsg s = OtherException s
+
+instance MonadTrans FromYamlT where
+    lift m = FromYamlT $ lift (lift m)
+
+type FromYamlM = FromYamlT Identity
+
+data FromYamlException =
+    CouldntReadScalar { _position :: Position,
+                        _expectedType :: String,
+                        _content :: String} |
+    MissingMapElement { _position :: Position
+                      , _neededElement :: String} |
+    InsufficientElements { _position :: Position
+                         , _collection :: String } |
+    TypeMismatch { _position :: Position
+                 , _expectedType :: String
+                 , _receivedInstead :: String } |
+    ReferenceToNonexistentAnchor { _position :: Position,
+                                   _anchor :: String } |
+    ReferenceToWrongAnchorType { _positionOfReference :: Position,
+--                               _expectedType :: String,  -- not sure if can be
+                                                           -- provided at all
+                                 _typeOfReferent :: String } |
+    ParseException ParseException |
+    OtherException { _message :: String }
+                   deriving (Show, Typeable) 
+instance Exception FromYamlException
+
+data ParseException = NonScalarKey
+                    | UnknownAlias { _anchorName :: AnchorName }
+                    | UnexpectedEvent { _pe_received :: Maybe Event
+                                      , _pe_expected :: Maybe Event
+                                      , _pe_position :: Maybe Position
+                                      }
+                    | InvalidYaml (Maybe String)
+    deriving (Show, Typeable)
+instance Exception ParseException
+
+data GFromYamlDict a = GFromYamlDict {
+      toYamlD :: a -> Text -> Bool
+}
+
+class Typeable a => FromYaml a where
+    fromYaml :: FromYamlObject -> FromYamlM a
+    -- | Applies to record types only. You can specialize this method to
+    -- allow given fields of a record to not be included in the YAML document.
+    -- Be careful if you ever allow exclusion for a strict field. Doing so will
+    -- leave not just that field but also the containing constructor undefined.
+    -- The first argument is a dummy and must not be evaluated.
+    allowExclusion  :: a -> Text -> Bool
+    allowExclusion _ _ = False
+
+    default fromYaml :: (Generic a, GFromYaml (Rep a)) => 
+                        FromYamlObject -> FromYamlM a
+    fromYaml x = fromCache x (\x -> to `fmap` runReaderT (gFromYaml x) (GFromYamlDict (allowExclusion :: a -> Text -> Bool)))
+
+class GFromYaml f where
+    gFromYaml :: FromYamlObject -> GFromYamlM f a
+
+type GFromYamlM f a = ReaderT (GFromYamlDict a) FromYamlM (f a)
 
 
+-- a bit annoying that this has to be here (it bloats up the import list too),
+-- but I didn't want to deal with recursive imports, and this gets called from
+-- the default fromYaml instance
+fromCache :: (Typeable b)
+             => FromYamlObject
+          -> (FromYamlObject -> FromYamlM b)
+          -> FromYamlM b
+fromCache (Anchor a v) cont = do 
+  FromYamlState refs <- FromYamlT get
+  rec { FromYamlT $ put (FromYamlState (Map.insert a (toDyn r) refs))
+      ; r <- case v of
+               Anchor a' v' -> fromCache v cont
+               Reference ann a' -> fromCache v cont
+               _ -> cont v }
+  return r
+fromCache (Reference ann a) _ = do
+  FromYamlState refs <- FromYamlT get 
+  case Map.lookup a refs of
+    Nothing -> throwError $ 
+               ReferenceToNonexistentAnchor (fromYamlPosition ann) (show a)
+    Just v -> case fromDynamic v of
+                Nothing -> throwError $ 
+                           ReferenceToWrongAnchorType
+                           (fromYamlPosition ann)
+                           (show $ dynTypeRep v)
+                Just r -> return r
+fromCache a cont = cont a

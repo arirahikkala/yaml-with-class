@@ -214,15 +214,6 @@ data ParserState = ParserState {
 newtype PErrorT m a = PErrorT { runPErrorT :: m (Either ParseException a) }
 type Parser = PErrorT (StateT ParserState IO)
 
-data ParseException = NonScalarKey
-                    | UnknownAlias { _anchorName :: Y.AnchorName }
-                    | UnexpectedEvent { _received :: Maybe Event
-                                      , _expected :: Maybe Event
-                                      , _position :: Maybe Position
-                                      }
-                    | InvalidYaml (Maybe String)
-    deriving (Show, Typeable)
-instance Exception ParseException
 
 
 instance Monad m => Monad (PErrorT m) where
