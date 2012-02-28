@@ -117,8 +117,8 @@ instance FromYaml Int where
 instance FromYaml Bool where
     fromYaml v = fromCache v go where
                        go (Scalar ann c)
-                           | T.unpack c == "true" = return True
-                           | T.unpack c == "false" = return False
+                           | T.unpack c == "True" = return True
+                           | T.unpack c == "False" = return False
                            | otherwise = typeMismatch "Bool" v
 
 instance FromYaml Float where

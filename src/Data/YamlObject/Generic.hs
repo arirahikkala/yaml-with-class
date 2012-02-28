@@ -188,11 +188,14 @@ instance (GFromRecord a, GFromRecord b) => GFromRecord (a :*: b) where
     {-# INLINE gParseRecord #-}
 
 instance (Selector s, GFromYaml a) => GFromRecord (S1 s a) where
-    gParseRecord (Mapping ann ps) = 
+    gParseRecord (Mapping ann ps) =
+        let tkey = pack key in
         ask >>= \dict -> 
-        case lookup (pack key) $ map (first (translateFieldD' dict undefined)) ps of
-          Nothing -> throwError $ MissingMapElement (fromYamlPosition ann)
-                                                    (show $ map (translateFieldD' dict undefined . fst) ps)
+        case lookup (translateFieldD' dict undefined $ tkey) $ ps of
+          Nothing -> if allowExclusionD dict undefined tkey
+                     then error "exclusion allowed and no value provided"
+                     else throwError $ MissingMapElement (fromYamlPosition ann)
+                              (unpack $ translateFieldD' dict undefined $ pack $ key)
           Just k -> gFromYaml k
         where
           key = selName (undefined :: t s a p)

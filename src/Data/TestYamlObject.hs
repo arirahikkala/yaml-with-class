@@ -10,6 +10,10 @@ import Data.YamlObject.Types
 import Debug.Trace
 import GHC.Generics
 import Data.Typeable
+import Data.Maybe
+import Text.YamlPickle
+import Data.Array
+import qualified Data.Text as Text
 
 data Foo = Bar Foo Foo |Foo {
       a :: Int
@@ -76,5 +80,45 @@ instance ToYaml StyledChar
 instance ToYaml Style
 instance ToYaml ColorName
 
+data IdlingType = UseWorkstation | GetStuffOnShelf deriving (Show, Read, Eq, Typeable, Generic)
+
+data IdlingPoint = IdlingPoint {
+      ipIdlingType_ :: IdlingType
+    , ipLocation_ :: Coord
+} deriving (Show, Read, Eq, Typeable, Generic)
+
+instance TranslateField IdlingPoint where
+    translateField _ = Text.init
+
+data Coord = Coord { x :: !Int, y :: !Int }
+             deriving (Eq, Ord, Show, Ix, Read, Typeable, Generic)
+
+
+data StoredFurnitureLayout = StoredFurnitureLayout {
+      layoutCharacters :: String
+    , layoutMap :: [String]
+    , layoutWallConstraints :: (WallConstraint, WallConstraint, WallConstraint, WallConstraint)
+
+    , layoutIdlingPoints :: [IdlingPoint]
+    , layoutRooms :: [String]
+    , layoutFrequency :: Double
+} deriving (Show, Read, Eq, Typeable, Generic)
+
+data WallConstraint = NoConstraint | AnyWall | OpenSpace | JustGlassWall | JustPlainWall deriving (Show, Read, Eq, Typeable, Generic)
+
+
+instance ToYaml IdlingType
+instance ToYaml IdlingPoint
+instance ToYaml Coord
+instance ToYaml WallConstraint
+instance ToYaml StoredFurnitureLayout
+instance FromYaml IdlingType
+instance FromYaml IdlingPoint
+instance FromYaml Coord
+instance FromYaml WallConstraint
+instance FromYaml StoredFurnitureLayout
+
 test = let a = [Abc (Foo 1 2) 'a', Qux, Seq 1 2, Abc (Bar (Foo 1 2) (Foo 4 5)) 'c']
        in (unmakeYaml $ addDummyFromYamlAnnotations $ makeYaml a) == Right a
+
+main = print ((unmakeYaml $ fromJust $ decode $ encode $ makeYaml $ FurniturePrototype "bookshelf" (StyledChar (Style False False Grey Black) 'c') [(50, BookRubble)] 100 False 0.8) :: Either FromYamlException FurniturePrototype)

@@ -85,8 +85,7 @@ class TranslateField a where
 
 instance TranslateField a
 
-class Share a => ToYaml a where
-    toYaml :: a -> ToYamlAction
+class Exclude a where
     -- | Applies to record types only. You can specialize this method to
     --   prevent certain fields from being serialized.
     --   Given a Haskell field name, it should return False if that field is
@@ -94,6 +93,11 @@ class Share a => ToYaml a where
     --   The first argument is a dummy and must not be evaluated..
     exclude  :: a -> Text -> Bool
     exclude _ _ = False
+
+instance Exclude a
+
+class (Share a, TranslateField a, Exclude a) => ToYaml a where
+    toYaml :: a -> ToYamlAction
 
     default toYaml :: (Generic a, GToYaml (Rep a)) => a -> ToYamlAction
     toYaml x = toCache x $ runReaderT (gToYaml $ from x) (GToYamlDict (exclude :: a -> Text -> Bool) (share :: a -> Bool) (translateField :: a -> Text -> Text))
@@ -180,19 +184,23 @@ data ParseException = NonScalarKey
 instance Exception ParseException
 
 data GFromYamlDict a = GFromYamlDict {
-      toYamlD :: a -> Text -> Bool,
+      allowExclusionD :: a -> Text -> Bool,
       translateFieldD' :: a -> Text -> Text
 }
-
-class Typeable a => FromYaml a where
-    fromYaml :: FromYamlObject -> FromYamlM a
+-- todo: test AllowExclusion
+class AllowExclusion a where
     -- | Applies to record types only. You can specialize this method to
     -- allow given fields of a record to not be included in the YAML document.
     -- Be careful if you ever allow exclusion for a strict field. Doing so will
     -- leave not just that field but also the containing constructor undefined.
     -- The first argument is a dummy and must not be evaluated.
-    allowExclusion  :: a -> Text -> Bool
+    allowExclusion :: a -> Text -> Bool
     allowExclusion _ _ = False
+
+instance AllowExclusion a
+
+class (Typeable a, TranslateField a, AllowExclusion a) => FromYaml a where
+    fromYaml :: FromYamlObject -> FromYamlM a
 
     default fromYaml :: (Generic a, GFromYaml (Rep a)) => 
                         FromYamlObject -> FromYamlM a
