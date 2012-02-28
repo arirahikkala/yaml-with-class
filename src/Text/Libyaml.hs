@@ -197,7 +197,7 @@ data Position = Position {
     , endLine :: Int
     , startColumn :: Int
     , endColumn :: Int
-} deriving Show
+} deriving (Show, Eq)
 
 foreign import ccall unsafe "get_event_type"
     c_get_event_type :: EventRaw -> IO CInt

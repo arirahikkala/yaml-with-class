@@ -41,9 +41,9 @@ Library
   C-sources: cbits/api.c  cbits/dumper.c  cbits/emitter.c  cbits/helper.c  cbits/loader.c  cbits/parser.c  cbits/reader.c  cbits/scanner.c  cbits/writer.c 
   include-dirs: cbits
   Exposed-modules: Text.YamlPickle, Data.DynStableName, Data.YamlObject
-  Other-modules: Text.Libyaml
+  Other-modules: Text.Libyaml, Data.ConvertibleInstances, Data.YamlObject.Generic, Data.YamlObject.Instances, Data.YamlObject.Support, Data.YamlObject.Types
   -- Packages needed in order to build this package.
-  Build-depends: hashmap, enumerator, mtl, transformers, convertible, bytestring, text, failure, containers, base, array, attempt, syb-with-class
+  Build-depends: hashmap, enumerator, mtl, transformers, convertible, bytestring, text, failure, containers, base, array, attempt, ghc-prim, dlist
 
   -- Modules not exported by this package.
   -- Other-modules:       

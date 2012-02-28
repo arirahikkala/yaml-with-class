@@ -11,9 +11,9 @@
 module Data.YamlObject.Types where
 
 import Data.Map (Map)
-import qualified Data.Map as Map (insert, lookup)
+import qualified Data.Map as Map (insert, lookup, insertWith)
 import Data.DynStableName (DynStableName)
-import Control.Monad.State (StateT, get, put)
+import Control.Monad.State (StateT, get, put, modify)
 import Control.Monad.Identity (Identity)
 import Data.Text (Text)
 import GHC.Generics
@@ -26,8 +26,12 @@ import Control.Exception (Exception)
 import Data.Typeable (Typeable)
 import Control.Applicative (Applicative, Alternative)
 
+import Data.Convertible (convert)
+import Data.ConvertibleInstances
 import Data.Dynamic (toDyn, fromDynamic, dynTypeRep)
 import Data.Typeable (typeOf)
+import Data.DynStableName
+import System.IO.Unsafe (unsafePerformIO)
 
 {- |
    YamlObject is a representation of general data in a way that's highly
@@ -57,22 +61,29 @@ data Anchor = Surrogate Int | Original Text deriving (Eq, Ord, Show)
 type ToYamlAction = ToYamlM ToYamlObject
 
 -- | The Share class is used for controlling what things get anchors generated
--- from them. If you are only outputting data that is small compared to the
--- amount of memory you have to work with, you can try adding Share instances
--- indiscriminately and going back and making things neater with
--- cleanUpReferences. Otherwise, whatever object share returns True on will
--- have an anchor to refer to it in the outputted document (unless replaced
--- with a reference)
-class Share a where
+-- | from them. If you are only outputting data that is small compared to the
+-- | amount of memory you have to work with, you can try adding Share instances
+-- | indiscriminately and going back and making things neater with
+-- | cleanUpReferences. Otherwise, whatever object share returns True on will
+-- | have an anchor to refer to it in the outputted document (unless replaced
+-- | with a reference)
 -- | If the instance of share for this type returns True when called,
--- place an anchor everywhere values of this type are output, and a
--- reference where the same value is used later. The argument
--- is safe to evaluate.
+-- | place an anchor everywhere values of this type are output, and a
+-- | reference where the same value is used later. The argument
+-- | is safe to evaluate.
+class Share a where
     share :: a -> Bool
     share _ = False
 
-instance Share a where
-    share _ = False
+instance Share a
+
+-- | Exclusion happens first, translation after that, so exclude based on 
+-- untranslated field names
+class TranslateField a where
+    translateField :: a -> Text -> Text
+    translateField _ = id
+
+instance TranslateField a
 
 class Share a => ToYaml a where
     toYaml :: a -> ToYamlAction
@@ -85,12 +96,13 @@ class Share a => ToYaml a where
     exclude _ _ = False
 
     default toYaml :: (Generic a, GToYaml (Rep a)) => a -> ToYamlAction
-    toYaml x = runReaderT (gToYaml $ from x) (GToYamlDict (exclude :: a -> Text -> Bool) (share :: a -> Bool))
+    toYaml x = toCache x $ runReaderT (gToYaml $ from x) (GToYamlDict (exclude :: a -> Text -> Bool) (share :: a -> Bool) (translateField :: a -> Text -> Text))
 
 -- there might be a more elegant way to do this than straight out dictionary passing, but I'm not sure I even want to know what it is
 data GToYamlDict a = GToYamlDict {
       excludeD :: a -> Text -> Bool
     , shareD :: a -> Bool
+    , translateFieldD :: a -> Text -> Text
 }
 
 
@@ -154,7 +166,7 @@ data FromYamlException =
                                  _typeOfReferent :: String } |
     ParseException ParseException |
     OtherException { _message :: String }
-                   deriving (Show, Typeable) 
+                   deriving (Show, Typeable, Eq) 
 instance Exception FromYamlException
 
 data ParseException = NonScalarKey
@@ -164,11 +176,12 @@ data ParseException = NonScalarKey
                                       , _pe_position :: Maybe Position
                                       }
                     | InvalidYaml (Maybe String)
-    deriving (Show, Typeable)
+    deriving (Show, Typeable, Eq)
 instance Exception ParseException
 
 data GFromYamlDict a = GFromYamlDict {
-      toYamlD :: a -> Text -> Bool
+      toYamlD :: a -> Text -> Bool,
+      translateFieldD' :: a -> Text -> Text
 }
 
 class Typeable a => FromYaml a where
@@ -183,7 +196,7 @@ class Typeable a => FromYaml a where
 
     default fromYaml :: (Generic a, GFromYaml (Rep a)) => 
                         FromYamlObject -> FromYamlM a
-    fromYaml x = fromCache x (\x -> to `fmap` runReaderT (gFromYaml x) (GFromYamlDict (allowExclusion :: a -> Text -> Bool)))
+    fromYaml x = fromCache x (\x -> to `fmap` runReaderT (gFromYaml x) (GFromYamlDict (allowExclusion :: a -> Text -> Bool) (translateField :: a -> Text -> Text)))
 
 class GFromYaml f where
     gFromYaml :: FromYamlObject -> GFromYamlM f a
@@ -191,9 +204,36 @@ class GFromYaml f where
 type GFromYamlM f a = ReaderT (GFromYamlDict a) FromYamlM (f a)
 
 
--- a bit annoying that this has to be here (it bloats up the import list too),
--- but I didn't want to deal with recursive imports, and this gets called from
--- the default fromYaml instance
+-- a bit annoying that these have to be here (it bloats up the import list too),
+-- but I didn't want to deal with recursive imports, and these have to be
+-- in the default instances
+
+toScalar x = return $ Scalar (ToYamlAnnotation ()) x
+toReference x = return $ Reference (ToYamlAnnotation ()) x
+toAnchor a x = return $ Anchor a x
+toMapping xs = return $ Mapping (ToYamlAnnotation ()) xs
+toSequence xs = return $ Sequence (ToYamlAnnotation ()) xs
+
+toCache
+  :: (ToYaml a) =>
+     a
+     -> ToYamlM (YamlObject ToYamlAnnotation k v)
+     -> ToYamlM (YamlObject ToYamlAnnotation k v)
+toCache x cont =
+    ToYamlT get >>= \(ToYamlState index m) ->
+    if share x
+    then let name = unsafePerformIO $ makeDynStableName $! x
+             hash = hashDynStableName name in
+         case do vals <- Map.lookup hash m
+                 lookup name vals of
+           Nothing -> do ToYamlT $ modify (\e -> e {nextId = succ (nextId e),
+                                                    cache = Map.insertWith (++) hash [(name, index)] (cache e)})
+                         v <- cont
+                         toAnchor (Original (convert index)) v
+           Just index -> toReference (Original $ convert index)
+    else cont
+
+
 fromCache :: (Typeable b)
              => FromYamlObject
           -> (FromYamlObject -> FromYamlM b)

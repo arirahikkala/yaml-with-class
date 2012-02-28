@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE OverlappingInstances #-}
 
 module Data.YamlObject.Instances where
 
@@ -25,71 +26,73 @@ instance ToYaml Bool where
     toYaml False = toScalar $ T.pack "false"
 
 instance ToYaml Int where
-    toYaml x = toScalar . convert $ x
+    toYaml x = toCache x . toScalar . convert $ x
 
 instance ToYaml Integer where
-    toYaml x = toScalar . convert $ x
+    toYaml x = toCache x . toScalar . convert $ x
 instance ToYaml Float where
-    toYaml x = toScalar . convert $ x
+    toYaml x = toCache x . toScalar . convert $ x
 instance ToYaml Double where
-    toYaml x = toScalar . convert $ x
+    toYaml x = toCache x . toScalar . convert $ x
 
 
 -- This way seems the most reasonable. Falling back on the generic instance would just output 'Scalar ":%"', and dividing into a float would lose precision (and if you were using Rational you might actually have been using it)
 instance (Integral a, Show a, Typeable a) => ToYaml (Ratio a) where
-    toYaml i = do
+    toYaml i = toCache i $ do
       num <- toScalar $ convert $ numerator i
       denom <- toScalar $ convert $ denominator i
       toMapping [(T.pack "numerator", num), (T.pack "denominator", denom)]
 
 instance ToYaml Char where
-    toYaml c = toScalar $ T.singleton c
+    toYaml c = toCache c $ toScalar $ T.singleton c
 
 instance ToYaml [Char] where
-    toYaml c = toScalar $ T.pack c
+    toYaml c = toCache c $ toScalar $ T.pack c
 
 instance (Typeable a, ToYaml a) => ToYaml (Maybe a) where
-    toYaml x = case x of
+    toYaml x = toCache x $ 
+               case x of
                  (Just c) -> do inside <- toYaml c
                                 toMapping [(T.pack "just", inside)]
                  Nothing -> toMapping []
 
 instance (ToYaml a, Show k, Typeable a, Typeable k)
          => ToYaml (Map k a) where
-    toYaml x =
+    toYaml x = toCache x $
         do vals <- mapM toYaml $ Map.elems x
            toMapping $ zip (map convert $ Map.keys x) vals
 
 instance (ToYaml a, Typeable a) => ToYaml (Set a) where
-    toYaml a =
+    toYaml a = toCache a $
         do vals <- mapM toYaml $ Set.elems a
            toSequence vals
  
 instance (ToYaml a, Typeable a) => ToYaml [a] where
-    toYaml xs = toSequence =<< mapM toYaml xs
+    toYaml xs = toCache xs $
+                (toSequence =<< mapM toYaml xs)
 
 -- todo: Generic array instance. I actually had one earlier, but it was causing weird type errors in some client code. Will have to figure out what the hell was going on with that.
 instance (Ix i, ToYaml e, Typeable e, Typeable i, ToYaml i) => ToYaml (Array i e) where
-    toYaml a =
+    toYaml a = toCache a $
         do bs <- toYaml $ bounds a
            es <- toYaml $ elems a
            toMapping [(T.pack "bounds", bs), (T.pack "elems", es)]
 
 instance (ToYaml a, Typeable a, ToYaml b, Typeable b) => ToYaml (a, b) where
-    toYaml (a, b) =
+    toYaml x@(a, b) = toCache x $
         do ar <- toYaml a
            br <- toYaml b
            toSequence [ar, br]
 
 instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c) => ToYaml (a, b, c) where
-    toYaml (a, b, c) =
+    toYaml x@(a, b, c) = toCache x $
         do ar <- toYaml a
            br <- toYaml b
            cr <- toYaml c
            toSequence [ar, br, cr]
 
 instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c, ToYaml d, Typeable d) => ToYaml (a, b, c, d) where
-    toYaml (a, b, c, d) =
+    toYaml x@(a, b, c, d) = toCache x $
         do ar <- toYaml a
            br <- toYaml b
            cr <- toYaml c
@@ -97,7 +100,7 @@ instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c, ToYa
            toSequence [ar, br, cr, dr]
 
 instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c, ToYaml d, Typeable d, ToYaml e, Typeable e) => ToYaml (a, b, c, d, e) where
-    toYaml (a, b, c, d, e) =
+    toYaml x@(a, b, c, d, e) = toCache x $
         do ar <- toYaml a
            br <- toYaml b
            cr <- toYaml c
@@ -111,6 +114,12 @@ instance (ToYaml a, Typeable a, ToYaml b, Typeable b, ToYaml c, Typeable c, ToYa
 instance FromYaml Int where
     fromYaml v = fromCache v scalarFromYamlAttempt
 
+instance FromYaml Bool where
+    fromYaml v = fromCache v go where
+                       go (Scalar ann c)
+                           | T.unpack c == "true" = return True
+                           | T.unpack c == "false" = return False
+                           | otherwise = typeMismatch "Bool" v
 
 instance FromYaml Float where
     fromYaml v = fromCache v scalarFromYamlAttempt

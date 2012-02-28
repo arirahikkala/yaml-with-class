@@ -18,32 +18,13 @@ import Data.Text (Text)
 import Control.Monad.Error (throwError)
 import Text.Libyaml (Position(..))
 import Data.Typeable (Typeable(typeOf))
+import Control.Arrow ((***))
+import Control.Applicative
+import Data.Traversable (traverse)
+
 import GHC.Generics
 
-toScalar x = return $ Scalar (ToYamlAnnotation ()) x
-toReference x = return $ Reference (ToYamlAnnotation ()) x
-toAnchor a x = return $ Anchor a x
-toMapping xs = return $ Mapping (ToYamlAnnotation ()) xs
-toSequence xs = return $ Sequence (ToYamlAnnotation ()) xs
 
-toCache
-  :: (ToYaml a) =>
-     a
-     -> ToYamlM (YamlObject ToYamlAnnotation k v)
-     -> ToYamlM (YamlObject ToYamlAnnotation k v)
-toCache x cont =
-    do (ToYamlState index m) <- ToYamlT get
-       if share x
-       then let name = unsafePerformIO $ makeDynStableName $! x
-                hash = hashDynStableName name in
-            case do vals <- Map.lookup hash m
-                    lookup name vals of
-              Nothing -> do ToYamlT $ modify (\e -> e {nextId = succ (nextId e),
-                                                       cache = Map.insertWith (++) hash [(name, index)] (cache e)})
-                            v <- cont
-                            toAnchor (Original (convert index)) v
-              Just index -> toReference (Original $ convert index)
-       else cont
 
 cToYaml x = toCache x $ toYaml x
 
@@ -81,3 +62,40 @@ scalarFromYamlAttempt e =
                    (fromYamlPosition (annotation e))
                    (show (typeOf (undefined :: t)))
                    (head . words . show $ e)
+
+-- | Apply a conversion to both the keys and values of an 'YamlObject'.
+mapKeysValues :: (kIn -> kOut)
+              -> (vIn -> vOut)
+              -> YamlObject ann kIn vIn
+              -> YamlObject ann kOut vOut
+mapKeysValues _ fv (Scalar ann v) = Scalar ann $ fv v
+mapKeysValues fk fv (Sequence ann os)= 
+    Sequence ann $ map (mapKeysValues fk fv) os
+mapKeysValues fk fv (Mapping ann pairs) =
+    Mapping ann $ map (fk *** mapKeysValues fk fv) pairs
+mapKeysValues fk fv (Reference ann s) = Reference ann s
+mapKeysValues fk fv (Anchor s v) = Anchor s $ mapKeysValues fk fv v
+
+mapKeysValuesA :: Applicative f 
+                  => (kIn -> f kOut)
+               -> (vIn -> f vOut)
+               -> YamlObject ann kIn vIn
+               -> f (YamlObject ann kOut vOut)
+mapKeysValuesA _ fv (Scalar ann v) = Scalar ann <$> fv v
+mapKeysValuesA fk fv (Sequence ann os)= 
+    Sequence ann <$> traverse (mapKeysValuesA fk fv) os
+mapKeysValuesA fk fv (Mapping ann pairs) =
+    Mapping ann <$> 
+    traverse (uncurry (liftA2 (,)) .  (fk *** mapKeysValuesA fk fv)) pairs
+mapKeysValuesA fk fv (Reference ann s) = pure $ Reference ann s
+mapKeysValuesA fk fv (Anchor s v) = Anchor s <$> mapKeysValuesA fk fv v
+
+mapKeysValuesM :: Monad m =>
+                 (kIn -> m kOut)
+              -> (vIn -> m vOut)
+              -> YamlObject ann kIn vIn
+              -> m (YamlObject ann kOut vOut)
+mapKeysValuesM fk fv =
+    let fk' = WrapMonad . fk
+        fv' = WrapMonad . fv
+     in unwrapMonad . mapKeysValuesA fk' fv'

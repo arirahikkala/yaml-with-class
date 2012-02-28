@@ -29,7 +29,8 @@ module Text.YamlPickle
 
 import qualified Text.Libyaml as Y
 import Text.Libyaml hiding (encode, decode, encodeFile, decodeFile, Anchor)
-import Data.YamlObject hiding (value, FromYamlObject, ToYamlObject, cs)
+import Data.YamlObject.Types hiding (value, FromYamlObject)
+import Data.YamlObject.Support
 import Data.ByteString (ByteString)
 import qualified Data.Map as Map
 import System.IO.Unsafe (unsafePerformIO)
@@ -348,8 +349,9 @@ parseMerges key value a merges front = do
          Just anchor -> do
              putParser (Map.insertWith (flip (++)) anchor [(key, firstFreeId)] refs) 
                        (succ firstFreeId)
-             return ((front [(key, Anchor (Surrogate firstFreeId) value)] `mergeAssocLists`),
+             return ((front [(key, {-Anchor (Surrogate firstFreeId)-} value)] `mergeAssocLists`),
                      merges)
+-- todo: Figure out what the fuck that "Anchor (Surrogate firstFreeId)" bit that I commented out was doing in there
 
 parseM :: Position
        -> Merges

@@ -6,7 +6,9 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE DoRec #-}
+{-# LANGUAGE EmptyDataDecls #-}
+
+-- todo: Go over everything in this file, make sure that everything is regular (this should mean that everything should be incredibly simple), so as to get stuff to actually work
 
 -- full disclosure: This file is basically a straight monadization of https://github.com/bos/aeson/blob/940449f4adc804fda4597cab4c25eae503e598ac/Data/Aeson/Types/Generic.hs (that being the most recent version that didn't scare me by doing crazy stuff with mutable vectors) and as such all credit for having actual programming skill goes straight to Bryan O. Sullivan and Bas Van Dijk.
 
@@ -25,16 +27,22 @@ import Control.Monad.Error (throwError)
 import Control.Applicative ((<$>), (<*>), (<|>))
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Vector ((!?))
-import qualified Data.Vector as V
 import Control.Monad.State (get, put)
 import Data.Dynamic
 import Control.Monad.Fix
+import Control.Arrow
+import Text.Libyaml (Position(..))
+import Debug.Trace (trace)
+
 instance (ToYaml a) => GToYaml (K1 i a) where
-    gToYaml (K1 x) = lift $ cToYaml x
+    gToYaml (K1 x) = lift $ toYaml x
     {-# INLINE gToYaml #-}
 
-instance (GToYaml a) => GToYaml (M1 i c a) where
+instance (GToYaml a) => GToYaml (M1 D c a) where
+    gToYaml (M1 x) = gToYaml x
+    {-# INLINE gToYaml #-}
+
+instance (GToYaml a) => GToYaml (M1 S c a) where
     gToYaml (M1 x) = gToYaml x
     {-# INLINE gToYaml #-}
 
@@ -42,8 +50,11 @@ instance GToYaml U1 where
     gToYaml _ = toSequence []
     {-# INLINE gToYaml #-}
 
+instance (GObject (M1 C c a), Constructor c, GToYaml a) => GToYaml (M1 C c a) where
+    gToYaml = gObject
+
 instance (GProductToValues a, GProductToValues b) => GToYaml (a :*: b) where
-    gToYaml x = 
+    gToYaml x =
         do objs <- sequence . toList . gProductToValues $ x
            toSequence objs
     {-# INLINE gToYaml #-}
@@ -53,7 +64,7 @@ instance (GObject a, GObject b) => GToYaml (a :+: b) where
     gToYaml (R1 x) = gObject x
     {-# INLINE gToYaml #-}
 
-----
+---
 
 class ConsToYaml f where consToYaml :: f a -> GToYamlAction a
 class ConsToYaml' b f where consToYaml' :: Tagged b (f a -> GToYamlAction a)
@@ -93,8 +104,8 @@ instance (Selector s, GToYaml a) => GRecordToPairs (S1 s a) where
            dict <- ask
            let name = pack $ selName m1
            if excludeD dict (error "exclude evaluated its first argument") name
-           then return empty
-           else return $ singleton (name, obj)
+             then return empty
+             else return $ singleton (translateFieldD dict undefined name, obj)
     {-# INLINE gRecordToPairs #-}
 
 ----
@@ -126,6 +137,12 @@ instance (Constructor c, GToYaml a, ConsToYaml a) => GObject (C1 c a) where
       toMapping [(pack $ conName (undefined :: t c a p), obj)]
     {-# INLINE gObject #-}
 
+-- nullary constructors become strings
+instance (Constructor c) => GObject (C1 c U1) where
+    gObject =
+      toScalar . pack . conName
+    {-# INLINE gObject #-}
+
 ---
 --- generic fromYaml
 
@@ -141,9 +158,24 @@ instance GFromYaml U1 where
     gFromYaml (Sequence _ []) = return U1
     gFromYaml v = typeMismatch "unit constructor (U1)" v
 
+instance (ConsFromYaml a) => GFromYaml (C1 c a) where
+--    gFromYaml v | trace ("C1 instance: " ++ show v) False = undefined
+    gFromYaml (Mapping ann [(key, value)]) = M1 `fmap` (consParseYaml $ value)
+-- todo: actually check the constructor name
+
 instance (GFromProduct a, GFromProduct b) => GFromYaml (a :*: b) where
+--    gFromYaml v | trace ("(:*:) instance: " ++ show v) False = undefined
     gFromYaml (Sequence ann xs) = gParseProduct xs
     gFromYaml v = typeMismatch "product (:*:)" v
+    {-# INLINE gFromYaml #-}
+
+instance (GFromSum a, GFromSum b) => GFromYaml (a :+: b) where
+--    gFromYaml v | trace ("(:+:) instance: " ++ show v) False = undefined
+    gFromYaml (Mapping ann ([keyVal@(constr, content)])) =
+        gParseSum (unpack constr, content)
+    gFromYaml (Scalar ann constr) =
+        gParseSum (unpack constr, error "gFromYaml: tried to find value inside nullary constructor")
+    gFromYaml v = typeMismatch "sum (:+:)" v
     {-# INLINE gFromYaml #-}
 
 ---
@@ -157,9 +189,10 @@ instance (GFromRecord a, GFromRecord b) => GFromRecord (a :*: b) where
 
 instance (Selector s, GFromYaml a) => GFromRecord (S1 s a) where
     gParseRecord (Mapping ann ps) = 
-        case lookup (pack key) $ ps of
+        ask >>= \dict -> 
+        case lookup (pack key) $ map (first (translateFieldD' dict undefined)) ps of
           Nothing -> throwError $ MissingMapElement (fromYamlPosition ann)
-                                                    key
+                                                    (show $ map (translateFieldD' dict undefined . fst) ps)
           Just k -> gFromYaml k
         where
           key = selName (undefined :: t s a p)
@@ -168,34 +201,47 @@ instance (Selector s, GFromYaml a) => GFromRecord (S1 s a) where
 
 ---
 
-class ProductSize f where
-    productSize :: Tagged2 f Int
-
-newtype Tagged2 (s :: * -> *) b = Tagged2 {unTagged2 :: b}
-
-instance (ProductSize a, ProductSize b) => ProductSize (a :*: b) where
-    productSize = Tagged2 $ unTagged2 (productSize :: Tagged2 a Int) +
-                            unTagged2 (productSize :: Tagged2 b Int)
-
-instance ProductSize (S1 s a) where
-    productSize = Tagged2 1
-
----
-
 class GFromSum f where
-    gParseSum :: (Text, FromYamlObject) -> GFromYamlM f a
+    gParseSum :: (String, FromYamlObject) -> GFromYamlM f a
 
 instance (GFromSum a, GFromSum b) => GFromSum (a :+: b) where
     gParseSum keyVal = (L1 <$> gParseSum keyVal) <|> (R1 <$> gParseSum keyVal)
     {-# INLINE gParseSum #-}
 
-instance (Constructor c, GFromYaml a{-, ConsFromYaml a-}) => GFromSum (C1 c a) where
+instance (Constructor c, GFromYaml a, ConsFromYaml a) => GFromSum (C1 c a) where
     gParseSum (key, value)
-        | key == pack constructor = gFromYaml value
-        | otherwise = throwError $ TypeMismatch (fromYamlPosition $ annotation value) (constructor ++ " (constructor") (unpack key)
+        | key == constructor = M1 `fmap` consParseYaml value
+        | otherwise = throwError $ TypeMismatch (Position (-1) (-1) (-1) (-1) {-fromYamlPosition $ annotation value-}) (constructor ++ " (constructor)") key
         where  constructor = conName (undefined :: t c a p)
     {-# INLINE gParseSum #-}
 
+instance (Constructor c) => GFromSum (C1 c U1) where
+    gParseSum (key, _)
+        | key == constructor = return $ M1 U1
+        | otherwise = fail "could not find constructor" -- todo: proper error reporting
+        where constructor = conName (undefined :: t c U1 p)
+
+--
+
+class ConsFromYaml f where consParseYaml :: FromYamlObject -> GFromYamlM f a
+class ConsFromYaml' b f where consParseYaml' :: Tagged b (FromYamlObject -> GFromYamlM f a)
+
+instance (IsRecord f b, ConsFromYaml' b f) => ConsFromYaml f where
+    consParseYaml = unTagged (consParseYaml' :: Tagged b (FromYamlObject -> GFromYamlM f a))
+    {-# INLINE consParseYaml #-}
+
+instance (GFromRecord f) => ConsFromYaml' True f where
+    consParseYaml' = Tagged gParseRecord
+        where
+          parseRecord o@(Mapping ann [(constr, obj)]) = gParseRecord obj
+          parseRecord v = typeMismatch "record (:*:)" v
+    {-# INLINE consParseYaml' #-}
+
+instance (GFromYaml f) => ConsFromYaml' False f where
+    consParseYaml' = Tagged gFromYaml
+        where go (Mapping ann [(constr, obj)]) = gFromYaml obj
+              go v = typeMismatch "product (:*:)" v
+    {-# INLINE consParseYaml' #-}
 --
 
 class GFromProduct f where
